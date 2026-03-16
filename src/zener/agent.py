@@ -48,12 +48,16 @@ def get_client() -> genai.Client:
     global _client
     if _client is None:
         cfg = config.get_config()
-        _client = genai.Client(
-            vertexai=True,
-            project=cfg.gcp_project,
-            location=cfg.gcp_location,
-        )
-        logger.info(f"Gemini client initialized for project: {cfg.gcp_project}")
+        if cfg.gemini_api_key:
+            _client = genai.Client(api_key=cfg.gemini_api_key)
+            logger.info(f"Gemini client initialized with API key")
+        else:
+            _client = genai.Client(
+                vertexai=True,
+                project=cfg.gcp_project,
+                location=cfg.gcp_location,
+            )
+            logger.info(f"Gemini client initialized for project: {cfg.gcp_project}")
     return _client
 
 
@@ -66,6 +70,11 @@ You can:
 - Run shell commands
 - Read and write files
 - Browse the web
+
+IMPORTANT RULES:
+- NEVER run commands that reference "zener", "activate", "venv", or that would cause recursion
+- Don't try to run the same command the user just typed - execute actual tasks
+- Focus on what the user wants to ACCOMPLISH, not replicating their terminal commands
 
 IMPORTANT: You must output your response as a JSON object with your plan and actions.
 
@@ -142,7 +151,7 @@ def analyze_task(task: str, screenshot_path: Optional[Path] = None) -> List[Acti
         )
     
     response = client.models.generate_content(
-        model=cfg.vertex_model,
+        model=cfg.gemini_model,
         contents=contents,
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -211,7 +220,7 @@ def analyze_screenshot(screenshot_path: Path) -> str:
         image_data = f.read()
     
     response = client.models.generate_content(
-        model=cfg.vertex_model,
+        model=cfg.gemini_model,
         contents=[
             types.Content(
                 parts=[

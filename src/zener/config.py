@@ -13,7 +13,8 @@ class Config:
     firebase_auth_domain: str
     gcp_project: str
     gcp_location: str
-    vertex_model: str = "gemini-2.0-flash-exp"
+    gemini_api_key: str
+    gemini_model: str = "gemini-2.0-flash"
     
     @classmethod
     def from_env(cls) -> "Config":
@@ -24,7 +25,8 @@ class Config:
         firebase_auth_domain = os.getenv("FIREBASE_AUTH_DOMAIN", f"{firebase_project_id}.firebaseapp.com")
         gcp_project = os.getenv("GOOGLE_CLOUD_PROJECT", "zener-ai-hackathon")
         gcp_location = os.getenv("GCP_LOCATION", "us-central1")
-        vertex_model = os.getenv("VERTEX_MODEL", "gemini-2.0-flash-exp")
+        gemini_api_key = os.getenv("GEMINI_API_KEY", "")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         
         return cls(
             firebase_api_key=firebase_api_key,
@@ -32,7 +34,8 @@ class Config:
             firebase_auth_domain=firebase_auth_domain,
             gcp_project=gcp_project,
             gcp_location=gcp_location,
-            vertex_model=vertex_model,
+            gemini_api_key=gemini_api_key,
+            gemini_model=gemini_model,
         )
 
 
