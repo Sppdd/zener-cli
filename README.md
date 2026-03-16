@@ -1,210 +1,292 @@
-# Zener CLI
+# Zener: Your AI Hands on the Screen
 
-AI desktop automation agent for macOS. Observes your screen and controls your computer using Google ADK multi-agent architecture, Gemini Vision, PyAutoGUI, and optional yabai window management.
+<p align="center">
+  <img src="https://img.shields.io/badge/Version-0.3.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/Platform-macOS-green" alt="Platform">
+  <img src="https://img.shields.io/badge/AI-Google%20ADK%20%2B%20Gemini-orange" alt="AI">
+  <img src="https://img.shields.io/badge/Cloud-Google%20Cloud%20Run-red" alt="Cloud">
+</p>
 
-## What's New in v0.2
+Zener is an AI desktop automation agent that acts as **your hands on the screen**. Using Google's ADK multi-agent framework and Gemini Vision, Zener observes your desktop, reasons about what it sees, and executes actions—opening apps, clicking buttons, typing text, and more.
 
-- **Multi-agent architecture** — Google ADK orchestrator delegates to 4 specialist sub-agents (Screen, Input, Window, Shell)
-- **Session memory** — the agent recalls context from earlier tasks within the same `zener shell` session
-- **PyAutoGUI input** — direct, precise mouse and keyboard control (replaces AppleScript for all input)
-- **Yabai integration** — manage windows, spaces, and displays (optional, graceful degradation if not installed)
-- **Desktop context** — every task starts with a live snapshot of open apps, windows, spaces, and a screenshot description
-- **Per-agent model selection** — each sub-agent uses a configurable Gemini model
+---
 
-## Requirements
+## 🏆 Hackathon Submission
+
+### 📃 Text Description
+
+**Project Overview**
+
+Zener is an AI desktop automation agent for macOS that combines cloud-powered AI reasoning with local desktop control. Unlike chatbots that just talk, Zener **does the work for you**—controlling your mouse, keyboard, and applications through natural conversation.
+
+**Key Features:**
+
+1. **Multi-Agent Architecture** — Google ADK orchestrator delegates to 4 specialist sub-agents:
+   - **ScreenAgent**: Takes and describes screenshots using Gemini Vision
+   - **InputAgent**: Controls mouse (click, double-click, right-click, scroll, drag) and keyboard (type, press keys)
+   - **WindowAgent**: Manages windows and spaces (optional yabai integration)
+   - **ShellAgent**: Runs shell commands, reads/writes files
+
+2. **Cloud-Powered AI** — All reasoning runs on Google Cloud Run with Vertex AI:
+   - **Orchestrator**: gemini-2.5-pro (deep reasoning)
+   - **Sub-agents**: gemini-2.5-flash (fast, efficient)
+
+3. **Session Memory** — Within a shell session, Zener remembers context from earlier tasks.
+
+4. **Desktop Context** — Every task starts with a live snapshot: frontmost app, open windows, screenshot description.
+
+5. **Real-time Streaming** — Watch the agent think and act step-by-step in your terminal.
+
+**Technologies Used:**
+
+| Layer | Technology |
+|-------|-------------|
+| Language | Python 3.11+ |
+| CLI | Click + prompt_toolkit |
+| AI Framework | Google ADK (Agent Development Kit) |
+| Vision | Gemini 2.5 Flash (Vertex AI) |
+| Orchestrator | Gemini 2.5 Pro (Vertex AI) |
+| Auth | Google ADC Identity Tokens |
+| Cloud | Google Cloud Run, Vertex AI |
+| macOS Input | PyAutoGUI |
+| Window Mgmt | yabai (optional) |
+| Container | Docker + Cloud Build + Cloud Run |
+
+**Findings & Learnings:**
+
+1. **Model Availability** — gemini-2.0-flash was deprecated mid-development; migrated to gemini-2.5-flash-lite
+2. **Cloud Deployment** — Cloud Run provides faster responses and higher quotas than client-side API calls
+3. **Bidirectional Protocol** — WebSocket `action_request` events allow cloud agents to control the local Mac
+4. **Graceful Degradation** — yabai is optional; window tasks return helpful install hints when unavailable
+
+---
+
+### 👨‍💻 URL to Public Code Repository
+
+**GitHub**: https://github.com/etharo/zener-web
+
+**Repository Structure:**
+- `zener-cli/` — macOS CLI client (what users install)
+- `zener-server/` — Cloud Run backend (ADK agents, Vertex AI)
+
+#### Spin-Up Instructions
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/etharo/zener-web.git
+cd zener-web/zener-cli
+
+# 2. Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Install dependencies
+pip install -e .
+
+# 4. Set up Google authentication (no API key needed!)
+gcloud auth login
+
+# 5. Run!
+zener setup    # authenticates with Google
+zener shell   # interactive REPL
+```
+
+---
+
+### 🖥️ Proof of Google Cloud Deployment
+
+**Live Backend**: https://zener-server-902816427420.us-central1.run.app
+
+**Deployment Evidence:**
+```
+Service: zener-server
+Region: us-central1
+URL: https://zener-server-902816427420.us-central1.run.app
+Revision: zener-server-00016-dcp
+Image: gcr.io/zener-ai-hackathon/zener-server:latest
+Memory: 2Gi | CPU: 2
+Deployed via: Cloud Build → Cloud Run
+```
+
+**Infrastructure as Code** (see `zener-server/cloudbuild.yaml`):
+```yaml
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "gcr.io/$PROJECT_ID/zener-server:latest", "."]
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args: ["run", "deploy", "zener-server", 
+           "--image=gcr.io/$PROJECT_ID/zener-server:latest",
+           "--region=us-central1", "--platform=managed"]
+```
+
+Deploy with one command:
+```bash
+cd zener-server
+gcloud builds submit --project=zener-ai-hackathon --config=cloudbuild.yaml .
+```
+
+---
+
+### 🏗️ Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         USER'S MAC (local)                           │
+│                                                                      │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │  zener CLI   │    │  PyAutoGUI   │    │    Screenshot        │  │
+│  │  (Python)   │───▶│  mouse/kb    │◀───│    (capture)        │  │
+│  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
+│         │                                                           │
+│  takes screenshot                                                   │
+│  executes actions                                                   │
+│         │ WebSocket (wss://zener-server-...run.app/ws/agent/...)   │
+└─────────┼───────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    GOOGLE CLOUD (Cloud Run)                         │
+│                                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                    ADK Multi-Agent Loop                        │   │
+│  │                                                                │   │
+│  │   ┌────────────────┐                                           │   │
+│  │   │ Orchestrator  │  gemini-2.5-pro                         │   │
+│  │   │   (Zener)     │──▶ ScreenAgent (gemini-2.5-flash)       │   │
+│  │   │                │──▶ InputAgent  (gemini-2.5-flash)       │   │
+│  │   │                │──▶ WindowAgent (gemini-2.5-flash)      │   │
+│  │   │                │──▶ ShellAgent  (gemini-2.5-flash)      │   │
+│  │   └────────────────┘                                           │   │
+│  │                                                                │   │
+│  │   InMemorySessionService + InMemoryMemoryService              │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                              │                                      │
+│                              ▼                                      │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                   Vertex AI API                               │   │
+│  │   gemini-2.5-pro, gemini-2.5-flash                         │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Data Flow:**
+1. User types task → CLI takes screenshot, sends to Cloud Run
+2. Orchestrator analyzes → Uses Gemini 2.5 Pro to reason
+3. Delegates to specialist → Screen/Input/Window/Shell agents
+4. Action request → Server sends `action_request` to CLI
+5. CLI executes locally → PyAutoGUI clicks/types
+6. Result sent back → Agent verifies, continues or completes
+
+---
+
+### 📹 Demonstration Video
+
+*(Record separately showing Zener in action)*
+
+**Script:**
+1. Open terminal, run `zener shell`
+2. Type: "open Safari and go to github.com"
+3. Show agent thinking, tool calls, final result
+4. Type: "take a screenshot" 
+5. Show screenshot description
+6. Type: "what apps do I have open?"
+7. Show desktop context awareness
+
+---
+
+## 🚀 Quick Start
+
+### Requirements
 
 - macOS
 - Python 3.11+
-- A free Gemini API key from [aistudio.google.com](https://aistudio.google.com/app/apikey)
-- *(Optional)* [yabai](https://github.com/koekeishiya/yabai) for window and space management
+- Google Cloud SDK (`gcloud`)
 
-## Install
+### Install
 
 ```bash
-git clone <repo>
-cd zener-cli
+git clone https://github.com/etharo/zener-web.git
+cd zener-web/zener-cli
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
 ```
 
-## Setup
+### Setup
 
 ```bash
 zener setup
-# Enter your Gemini API key when prompted.
-# Saved to ~/.zener/config.json (chmod 600).
+# Follow prompts to authenticate with Google
 ```
 
-## Usage
+### Usage
 
-### Interactive REPL
-
-```bash
-zener shell
-```
-
-REPL built-in commands:
-
-| Command | Description |
-|---|---|
-| `exit` / `quit` / `q` | Exit Zener |
-| `help` | Show available commands |
-| `screenshot` | Take and describe the current screen |
-| `models` | Show configured models per agent |
-| `setup` | Reminder to run `zener setup` |
-
-Anything else is sent to the AI agent.
-
-### Single task (non-interactive)
-
-```bash
-zener run "open Safari and go to github.com"
-# exits 0 on success, 1 on failure
-```
-
-### Describe current screen
-
-```bash
-zener screenshot
-```
-
-## Architecture
-
-```
-User task (zener shell or zener run)
-         │
-         ▼
-  Desktop context snapshot
-  ├── frontmost app (AppleScript)
-  ├── screen size (PyAutoGUI)
-  ├── open windows / spaces / displays (yabai)
-  └── live screenshot description (Gemini Vision)
-         │
-         ▼
-  OrchestratorAgent  [gemini-2.5-flash]
-  ├── ScreenAgent    [gemini-2.0-flash] → take_screenshot, describe_screenshot
-  ├── InputAgent     [gemini-2.0-flash] → mouse_click, keyboard_type, mouse_scroll, …
-  ├── WindowAgent    [gemini-2.0-flash] → yabai query/focus/move/resize/swap
-  └── ShellAgent     [gemini-2.0-flash] → shell_run, file_read, file_write, file_list_dir
-         │
-         ▼
-  ADK Session memory (cross-task recall within one shell session)
-```
-
-## Agent tools
-
-### ScreenAgent
-`take_screenshot` · `describe_screenshot`
-
-### InputAgent
-`mouse_click` · `mouse_double_click` · `mouse_right_click` · `mouse_scroll` · `mouse_drag` · `keyboard_type` · `keyboard_press_key` · `wait`
-
-### WindowAgent (requires yabai)
-`get_desktop_context` · `yabai_query_windows` · `yabai_query_spaces` · `yabai_query_displays` · `yabai_focus_window` · `yabai_focus_window_by_app` · `yabai_move_to_space` · `yabai_focus_space` · `yabai_move_and_follow` · `yabai_toggle_fullscreen` · `yabai_toggle_float` · `yabai_balance_space` · `yabai_rotate_space` · `yabai_resize_window` · `yabai_warp_window` · `yabai_swap_window`
-
-### ShellAgent
-`shell_run` · `file_read` · `file_write` · `file_list_dir`
-
-## Model configuration
-
-Each agent uses a separate configurable model. Override via environment variables:
-
-```bash
-export ZENER_ORCHESTRATOR_MODEL=gemini-2.5-flash-preview-04-17
-export ZENER_SCREEN_MODEL=gemini-2.0-flash
-export ZENER_INPUT_MODEL=gemini-2.0-flash
-export ZENER_WINDOW_MODEL=gemini-2.0-flash
-export ZENER_SHELL_MODEL=gemini-2.0-flash
-```
-
-Or check what's active inside the REPL: type `models`.
-
-## Optional: yabai window management
-
-```bash
-brew install koekeishiya/formulae/yabai
-brew services start yabai
-```
-
-Without yabai, window-management tasks return a clear install hint and the agent falls back to AppleScript for basic app activation. Everything else works normally.
-
-## Safety
-
-- Dangerous shell commands (`rm -rf`, `dd`, `shutdown`, `reboot`, fork bomb, etc.) are blocked outright
-- Dangerous commands that pass the blocklist still require explicit terminal confirmation
-- PyAutoGUI `FAILSAFE` is disabled — Zener manages safety through its agent reasoning
-
-## Testing the new features
-
-### 1. Screen description
-
-```bash
-zener screenshot
-# Should describe exactly what's on screen using Gemini Vision
-```
-
-### 2. Multi-agent tool calls (watch the step output)
-
+**Interactive REPL:**
 ```bash
 zener shell
 ❯ open Calculator
-# Expected output:
-#   Zener (thought block)
-#   1. [ScreenAgent] ...  ✓
-#   2. [open]  ✓
-#   3. [screenshot]  ✓
-#   ─────────────────────
-#   Calculator is now open.
+❯ go to google.com and search for "weather in NYC"
 ```
 
-### 3. Session memory across tasks
+**Single Task:**
+```bash
+zener run "open Safari and go to github.com"
+```
+
+**Screenshot:**
+```bash
+zener screenshot
+```
+
+---
+
+## 🛠️ Architecture Details
+
+### Agent Tools
+
+**ScreenAgent**
+- `take_screenshot` — Capture current screen
+- `describe_screenshot` — Gemini Vision analysis
+
+**InputAgent**
+- `mouse_click`, `mouse_double_click`, `mouse_right_click`
+- `mouse_scroll`, `mouse_drag`
+- `keyboard_type`, `keyboard_press_key`
+- `open_application`, `open_url`
+
+**WindowAgent** (yabai optional)
+- `get_desktop_context` — Query windows/spaces/displays
+- `yabai_focus_window`, `yabai_move_to_space`, etc.
+
+**ShellAgent**
+- `shell_run` — Execute commands in the cloud container
+- `file_read`, `file_write`, `file_list_dir`
+
+### Model Configuration
+
+Override via environment variables:
 
 ```bash
-zener shell
-❯ create a file called /tmp/zener-test.txt with the content "hello from zener"
-# Agent creates the file
-
-❯ what did we just write to the filesystem?
-# Agent should recall the file without needing another tool call
+export ZENER_ORCHESTRATOR_MODEL=gemini-2.5-pro
+export ZENER_SCREEN_MODEL=gemini-2.5-flash
+export ZENER_SERVER_URL=https://zener-server-902816427420.us-central1.run.app
 ```
 
-### 4. Desktop context awareness
+---
 
-```bash
-zener shell
-❯ what apps do I have open right now?
-# Agent reads context snapshot (frontmost app, open windows) before responding
-```
+## 🔒 Safety
 
-### 5. Shell agent
+- Dangerous shell commands (`rm -rf`, `dd`, `shutdown`, etc.) are blocked
+- Shell commands require terminal confirmation when crossing safety thresholds
+- All actions execute locally on your Mac—you control what Zener can do
 
-```bash
-zener shell
-❯ run "ls -la ~" and tell me how many items are in my home directory
-```
+---
 
-### 6. Window management (yabai required)
+## 📄 License
 
-```bash
-brew install koekeishiya/formulae/yabai && brew services start yabai
-zener shell
-❯ show me all my spaces
-❯ move Safari to space 2
-❯ balance the windows on this space
-```
+MIT License - See LICENSE file for details.
 
-### 7. Model inspection
+---
 
-```bash
-zener shell
-❯ models
-# Lists orchestrator + all sub-agent models
-```
-
-### 8. Single-task mode
-
-```bash
-zener run "open Terminal and type echo hello"
-echo $?   # 0 = success, 1 = failure
-```
+*Submitted for the Gemini Live Agent Challenge 2026*
