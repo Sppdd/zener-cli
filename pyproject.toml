@@ -4,15 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zener-cli"
-version = "0.1.0"
-description = "AI-powered CLI assistant for macOS with Gemini Vision"
+version = "0.2.0"
+description = "AI desktop automation agent for macOS — multi-agent, session memory, yabai window management"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "google-adk>=1.0.0",
     "google-genai>=1.0.0",
+    "pyautogui>=0.9.54",
     "click>=8.1.0",
     "firebase-admin>=6.0.0",
-    "pillow>=10.0.0",
     "python-dotenv>=1.0.0",
     "prompt-toolkit>=3.0.0",
     "requests>=2.31.0",

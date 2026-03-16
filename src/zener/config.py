@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -8,34 +8,50 @@ from dotenv import load_dotenv
 
 @dataclass
 class Config:
-    firebase_api_key: str
-    firebase_project_id: str
-    firebase_auth_domain: str
+    # ── Gemini / GCP ──────────────────────────────────────────────────────────
+    gemini_api_key: str
     gcp_project: str
     gcp_location: str
-    gemini_api_key: str
-    gemini_model: str = "gemini-2.0-flash"
-    
+
+    # ── Per-agent model selection ──────────────────────────────────────────────
+    # Orchestrator: complex reasoning and delegation
+    orchestrator_model: str = "gemini-2.5-flash"
+    # Screen agent: fast multimodal screen description
+    screen_model: str = "gemini-2.5-flash-lite"
+    # Input agent: mouse/keyboard action planning
+    input_model: str = "gemini-2.5-flash-lite"
+    # Window/yabai agent: space and window management
+    window_model: str = "gemini-2.5-flash-lite"
+    # Shell agent: file system and shell commands
+    shell_model: str = "gemini-2.5-flash-lite"
+
+    # ── Firebase (optional, unused by default) ────────────────────────────────
+    firebase_api_key: str = ""
+    firebase_project_id: str = "zener-ai-hackathon"
+    firebase_auth_domain: str = ""
+
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
-        
-        firebase_api_key = os.getenv("FIREBASE_API_KEY", "")
+
         firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "zener-ai-hackathon")
-        firebase_auth_domain = os.getenv("FIREBASE_AUTH_DOMAIN", f"{firebase_project_id}.firebaseapp.com")
-        gcp_project = os.getenv("GOOGLE_CLOUD_PROJECT", "zener-ai-hackathon")
-        gcp_location = os.getenv("GCP_LOCATION", "us-central1")
-        gemini_api_key = os.getenv("GEMINI_API_KEY", "")
-        gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-        
+
         return cls(
-            firebase_api_key=firebase_api_key,
+            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+            gcp_project=os.getenv("GOOGLE_CLOUD_PROJECT", "zener-ai-hackathon"),
+            gcp_location=os.getenv("GCP_LOCATION", "us-central1"),
+            # Per-agent models (overridable via env)
+            orchestrator_model=os.getenv("ZENER_ORCHESTRATOR_MODEL", "gemini-2.5-flash"),
+            screen_model=os.getenv("ZENER_SCREEN_MODEL", "gemini-2.5-flash-lite"),
+            input_model=os.getenv("ZENER_INPUT_MODEL", "gemini-2.5-flash-lite"),
+            window_model=os.getenv("ZENER_WINDOW_MODEL", "gemini-2.5-flash-lite"),
+            shell_model=os.getenv("ZENER_SHELL_MODEL", "gemini-2.5-flash-lite"),
+            # Firebase (optional)
+            firebase_api_key=os.getenv("FIREBASE_API_KEY", ""),
             firebase_project_id=firebase_project_id,
-            firebase_auth_domain=firebase_auth_domain,
-            gcp_project=gcp_project,
-            gcp_location=gcp_location,
-            gemini_api_key=gemini_api_key,
-            gemini_model=gemini_model,
+            firebase_auth_domain=os.getenv(
+                "FIREBASE_AUTH_DOMAIN", f"{firebase_project_id}.firebaseapp.com"
+            ),
         )
 
 
@@ -44,7 +60,7 @@ class User:
     uid: str
     email: str
     display_name: Optional[str] = None
-    
+
     def __str__(self) -> str:
         return self.email
 
