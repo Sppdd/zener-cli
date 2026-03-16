@@ -207,83 +207,118 @@ def _check_adc_fast() -> bool:
     return any(p.exists() for p in candidates)
 
 
+# ── Spinner ───────────────────────────────────────────────────────────────────
+
+class Spinner:
+    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def __init__(self, label: str = "Working..."):
+        self._label = label
+        self._lock  = threading.Lock()
+        self._stop  = threading.Event()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    @property
+    def label(self) -> str:
+        with self._lock:
+            return self._label
+
+    @label.setter
+    def label(self, value: str) -> None:
+        with self._lock:
+            self._label = value
+
+    def _spin(self) -> None:
+        i = 0
+        while not self._stop.is_set():
+            frame = click.style(self.FRAMES[i % len(self.FRAMES)], fg="cyan")
+            with self._lock:
+                lbl = self._label
+            txt = click.style(lbl, fg="bright_black")
+            sys.stdout.write(f"\r  {frame} {txt}   ")
+            sys.stdout.flush()
+            time.sleep(0.08)
+            i += 1
+        sys.stdout.write("\r" + " " * 50 + "\r")
+        sys.stdout.flush()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def __enter__(self) -> "Spinner":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.stop()
+
+
 # ── CLI callbacks ─────────────────────────────────────────────────────────────
 
 class TerminalCallbacks(loop_module.LoopCallbacks):
+    def __init__(self) -> None:
+        self._spinner: Optional[Spinner] = None
+
+    def on_status(self, text: str) -> None:
+        """Show/update/clear the spinner with a transient status label."""
+        if text:
+            if self._spinner is None:
+                self._spinner = Spinner(text)
+            else:
+                self._spinner.label = text
+        else:
+            # Empty text → stop spinner
+            if self._spinner is not None:
+                self._spinner.stop()
+                self._spinner = None
+
+    def _clear_spinner(self) -> None:
+        """Stop spinner before printing anything permanent."""
+        if self._spinner is not None:
+            self._spinner.stop()
+            self._spinner = None
+
     def on_thought(self, author: str, text: str) -> None:
         if text:
+            self._clear_spinner()
             print_thought(author, text)
 
     def on_tool_call(self, step: int, tool_name: str, tool_input: Dict[str, Any]) -> None:
+        self._clear_spinner()
         print_tool_start(step, tool_name, tool_input)
 
     def on_tool_result(self, step: int, tool_name: str, ok: bool, summary: str) -> None:
         print_tool_done(ok, summary)
 
     def on_screenshot(self, description: str) -> None:
+        self._clear_spinner()
         print_screenshot_desc(description)
 
     def on_final(self, text: str) -> None:
         if text:
+            self._clear_spinner()
             print_final(text)
 
     def on_done(self, success: bool) -> None:
+        self._clear_spinner()
         if success:
             print_success("Done")
         else:
             print_warning("Stopped")
 
     def confirm_dangerous(self, message: str) -> bool:
+        self._clear_spinner()
         return confirm_dangerous(message)
-
-
-# ── Spinner ───────────────────────────────────────────────────────────────────
-
-class Spinner:
-    FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-
-    def __init__(self, label: str = "Thinking"):
-        self.label = label
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-
-    def _spin(self) -> None:
-        i = 0
-        while not self._stop.is_set():
-            frame = click.style(self.FRAMES[i % len(self.FRAMES)], fg="cyan")
-            label = click.style(self.label, fg="bright_black")
-            sys.stdout.write(f"\r  {frame} {label}  ")
-            sys.stdout.flush()
-            time.sleep(0.08)
-            i += 1
-        sys.stdout.write("\r" + " " * 40 + "\r")
-        sys.stdout.flush()
-
-    def __enter__(self) -> "Spinner":
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_) -> None:
-        self._stop.set()
-        self._thread.join()
 
 
 # ── Core task runner ──────────────────────────────────────────────────────────
 
-_session_loop: Optional[loop_module.AgentLoop] = None
-
-
-def _get_session_loop() -> loop_module.AgentLoop:
-    global _session_loop
-    if _session_loop is None:
-        _session_loop = loop_module.AgentLoop(callbacks=TerminalCallbacks())
-    return _session_loop
-
-
 def process_task(task: str) -> bool:
     click.echo(f"\n  {click.style('Task:', fg='cyan', bold=True)} {task}\n")
 
-    agent_loop = _get_session_loop()
+    # Fresh callbacks per task so spinner state is always clean
+    agent_loop = loop_module.AgentLoop(callbacks=TerminalCallbacks())
 
     try:
         success = agent_loop.run(task)

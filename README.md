@@ -11,284 +11,295 @@ Zener is an AI desktop automation agent that acts as **your hands on the screen*
 
 ---
 
-
-### 📃 Text Description
-
-**Project Overview**
-
-Zener is an AI desktop automation agent for macOS that combines cloud-powered AI reasoning with local desktop control. Unlike chatbots that just talk, Zener **does the work for you**—controlling your mouse, keyboard, and applications through natural conversation.
-
-**Key Features:**
-
-1. **Multi-Agent Architecture** — Google ADK orchestrator delegates to 4 specialist sub-agents:
-   - **ScreenAgent**: Takes and describes screenshots using Gemini Vision
-   - **InputAgent**: Controls mouse (click, double-click, right-click, scroll, drag) and keyboard (type, press keys)
-   - **WindowAgent**: Manages windows and spaces (optional yabai integration)
-   - **ShellAgent**: Runs shell commands, reads/writes files
-
-2. **Cloud-Powered AI** — All reasoning runs on Google Cloud Run with Vertex AI:
-   - **Orchestrator**: gemini-2.5-pro (deep reasoning)
-   - **Sub-agents**: gemini-2.5-flash (fast, efficient)
-
-3. **Session Memory** — Within a shell session, Zener remembers context from earlier tasks.
-
-4. **Desktop Context** — Every task starts with a live snapshot: frontmost app, open windows, screenshot description.
-
-5. **Real-time Streaming** — Watch the agent think and act step-by-step in your terminal.
-
-**Technologies Used:**
-
-| Layer | Technology |
-|-------|-------------|
-| Language | Python 3.11+ |
-| CLI | Click + prompt_toolkit |
-| AI Framework | Google ADK (Agent Development Kit) |
-| Vision | Gemini 2.5 Flash (Vertex AI) |
-| Orchestrator | Gemini 2.5 Pro (Vertex AI) |
-| Auth | Google ADC Identity Tokens |
-| Cloud | Google Cloud Run, Vertex AI |
-| macOS Input | PyAutoGUI |
-| Window Mgmt | yabai (optional) |
-| Container | Docker + Cloud Build + Cloud Run |
-
-**Findings & Learnings:**
-
-1. **Model Availability** — gemini-2.0-flash was deprecated mid-development; migrated to gemini-2.5-flash-lite
-2. **Cloud Deployment** — Cloud Run provides faster responses and higher quotas than client-side API calls
-3. **Bidirectional Protocol** — WebSocket `action_request` events allow cloud agents to control the local Mac
-4. **Graceful Degradation** — yabai is optional; window tasks return helpful install hints when unavailable
-
----
-
-### 👨‍💻 URL to Public Code Repository
-
-
-**Repository Structure:**
-- `zener-cli/` — macOS CLI client (what users install)
-- `zener-server/` — Cloud Run backend (ADK agents, Vertex AI)
-
-#### Spin-Up Instructions
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/etharo/zener-cli.git
-cd zener-cli
-
-# 2. Create a Python virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Install Python dependencies
-pip install -e .
-
-# 4. Set up API keys/configuration
-# Copy .env.example to .env, then fill in your keys (see .env.example for details)
-cp ../.env.example .env
-# Edit .env and fill in your Firebase, Google Cloud, and Gemini API credentials
-
-# 5. (Optional, for GCP usage) Authenticate with Google Cloud if deploying server/code:
-#gcloud auth login
-
-# 6. Run Zener CLI
-zener setup    # enter API keys, perform initial config
-zener shell    # interactive CLI session
-```
-
----
-
-### 🖥️ Proof of Google Cloud Deployment
-
-**Live Backend**: https://zener-server-902816427420.us-central1.run.app
-
-**Deployment Evidence:**
-```
-Service: zener-server
-Region: us-central1
-URL: https://zener-server-902816427420.us-central1.run.app
-Revision: zener-server-00016-dcp
-Image: gcr.io/zener-ai-hackathon/zener-server:latest
-Memory: 2Gi | CPU: 2
-Deployed via: Cloud Build → Cloud Run
-```
-
-**Infrastructure as Code** (see `zener-server/cloudbuild.yaml`):
-```yaml
-steps:
-  - name: "gcr.io/cloud-builders/docker"
-    args: ["build", "-t", "gcr.io/$PROJECT_ID/zener-server:latest", "."]
-  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    entrypoint: gcloud
-    args: ["run", "deploy", "zener-server", 
-           "--image=gcr.io/$PROJECT_ID/zener-server:latest",
-           "--region=us-central1", "--platform=managed"]
-```
-
-Deploy with one command:
-```bash
-cd zener-server
-gcloud builds submit --project=zener-ai-hackathon --config=cloudbuild.yaml .
-```
-
----
-
-### 🏗️ Architecture Diagram
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         USER'S MAC (local)                           │
-│                                                                      │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │  zener CLI   │    │  PyAutoGUI   │    │    Screenshot        │  │
-│  │  (Python)   │───▶│  mouse/kb    │◀───│    (capture)        │  │
-│  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
-│         │                                                           │
-│  takes screenshot                                                   │
-│  executes actions                                                   │
-│         │ WebSocket (wss://zener-server-...run.app/ws/agent/...)   │
-└─────────┼───────────────────────────────────────────────────────────┘
-          │
-          ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    GOOGLE CLOUD (Cloud Run)                         │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                    ADK Multi-Agent Loop                        │   │
-│  │                                                                │   │
-│  │   ┌────────────────┐                                           │   │
-│  │   │ Orchestrator  │  gemini-2.5-pro                         │   │
-│  │   │   (Zener)     │──▶ ScreenAgent (gemini-2.5-flash)       │   │
-│  │   │                │──▶ InputAgent  (gemini-2.5-flash)       │   │
-│  │   │                │──▶ WindowAgent (gemini-2.5-flash)      │   │
-│  │   │                │──▶ ShellAgent  (gemini-2.5-flash)      │   │
-│  │   └────────────────┘                                           │   │
-│  │                                                                │   │
-│  │   InMemorySessionService + InMemoryMemoryService              │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                              │                                      │
-│                              ▼                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                   Vertex AI API                               │   │
-│  │   gemini-2.5-pro, gemini-2.5-flash                         │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**Data Flow:**
-1. User types task → CLI takes screenshot, sends to Cloud Run
-2. Orchestrator analyzes → Uses Gemini 2.5 Pro to reason
-3. Delegates to specialist → Screen/Input/Window/Shell agents
-4. Action request → Server sends `action_request` to CLI
-5. CLI executes locally → PyAutoGUI clicks/types
-6. Result sent back → Agent verifies, continues or completes
-
----
-
-### 📹 Demonstration Video
-
-*(Record separately showing Zener in action)*
-
-**Script:**
-1. Open terminal, run `zener shell`
-2. Type: "open Safari and go to github.com"
-3. Show agent thinking, tool calls, final result
-4. Type: "take a screenshot" 
-5. Show screenshot description
-6. Type: "what apps do I have open?"
-7. Show desktop context awareness
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Requirements
 
 - macOS
 - Python 3.11+
-- Google Cloud SDK (`gcloud`)
+- Google Cloud SDK (`gcloud`) — [install](https://cloud.google.com/sdk/docs/install)
 
-### Install
+### 1. Install the CLI
 
 ```bash
 git clone https://github.com/etharo/zener-web.git
 cd zener-web/zener-cli
+
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
 ```
 
-### Setup
+### 2. Authenticate
 
 ```bash
-zener setup
-# Follow prompts to authenticate with Google Firebase Auth
+# One-time Google login (opens browser)
+gcloud auth login
+gcloud auth application-default login
 ```
 
-### Usage
+### 3. Run Zener
 
-**Interactive REPL:**
 ```bash
-zener shell
-❯ open Calculator
-❯ go to google.com and search for "weather in NYC"
+zener setup        # verifies auth, saves server URL
+zener shell        # open the interactive REPL
 ```
 
-**Single Task:**
-```bash
-zener run "open Safari and go to github.com"
+```
+  ╔══════════════════════════════════════════════════╗
+  ║  Z E N E R — your hands on the screen          ║
+  ╚══════════════════════════════════════════════════╝
+  status: ready  (Vertex AI / Cloud Run)
+  server: https://zener-server-902816427420.us-central1.run.app
+  type:   your task, or help / exit
+
+  ❯ open Safari and go to github.com
 ```
 
-**Screenshot:**
+### Commands
+
 ```bash
-zener screenshot
+zener shell                         # interactive REPL
+zener run "open Calculator"         # single task, exits 0/1
+zener screenshot                    # describe current screen
+zener setup                         # re-run auth setup
 ```
 
 ---
 
-## 🛠️ Architecture Details
+## Architecture
 
-### Agent Tools
+```
+╔══════════════════════════════════════════════════════════════════╗
+║                        USER'S MAC                                ║
+║                                                                  ║
+║   ┌─────────────────────────────────────────────────────────┐   ║
+║   │  zener CLI  (Python, prompt_toolkit)                    │   ║
+║   │                                                         │   ║
+║   │  1. Takes screenshot  ──▶  screencapture (macOS)       │   ║
+║   │  2. Describes screen  ──▶  Gemini Vision (local call)  │   ║
+║   │  3. Sends task + screenshot over WebSocket              │   ║
+║   │  4. Receives action_request  ──▶  executes locally     │   ║
+║   │     • mouse_click / double_click / right_click         │   ║
+║   │     • mouse_scroll / mouse_drag                        │   ║
+║   │     • keyboard_type / keyboard_press_key               │   ║
+║   │     • open_application / open_url                      │   ║
+║   │  5. Sends action_result back to server                  │   ║
+║   └────────────────────┬────────────────────────────────────┘   ║
+║                        │                                         ║
+║              WebSocket (wss://)  +  Google Identity Token        ║
+╚════════════════════════╪═════════════════════════════════════════╝
+                         │
+                         ▼
+╔══════════════════════════════════════════════════════════════════╗
+║                   GOOGLE CLOUD RUN                               ║
+║                                                                  ║
+║   ┌─────────────────────────────────────────────────────────┐   ║
+║   │  FastAPI  ──  /ws/agent/{session_id}  (WebSocket)       │   ║
+║   └────────────────────┬────────────────────────────────────┘   ║
+║                        │                                         ║
+║   ┌────────────────────▼────────────────────────────────────┐   ║
+║   │  ADK Multi-Agent Loop  (adk_loop.py)                    │   ║
+║   │                                                         │   ║
+║   │   ┌──────────────────────────────────────────────────┐  │   ║
+║   │   │  Orchestrator  (gemini-2.5-pro)                  │  │   ║
+║   │   │    Reasons about the task, delegates to agents   │  │   ║
+║   │   └──────┬───────────────────────────────────────────┘  │   ║
+║   │          │                                               │   ║
+║   │    ┌─────┼──────────────────────┐                       │   ║
+║   │    ▼     ▼                      ▼                       │   ║
+║   │  ScreenAgent   InputAgent    WindowAgent  ShellAgent     │   ║
+║   │  (Flash)       (Flash)       (Flash)      (Flash)        │   ║
+║   │  screenshots   clicks/keys   windows      shell cmds     │   ║
+║   └─────────────────────────────────────────────────────────┘   ║
+║                        │                                         ║
+║   ┌────────────────────▼────────────────────────────────────┐   ║
+║   │  Vertex AI API  (gemini-2.5-pro / gemini-2.5-flash)     │   ║
+║   └─────────────────────────────────────────────────────────┘   ║
+╚══════════════════════════════════════════════════════════════════╝
+```
 
-**ScreenAgent**
-- `take_screenshot` — Capture current screen
-- `describe_screenshot` — Gemini Vision analysis
+### Data Flow (one task cycle)
 
-**InputAgent**
+```
+User types task
+      │
+      ▼
+CLI takes screenshot ──▶ screencapture (local, ~0.5s)
+      │
+      ▼
+CLI describes screen ──▶ Gemini Vision API (local, ~1–2s)
+      │                   prints "Screen: ..."
+      ▼
+CLI opens WebSocket ──▶ Cloud Run /ws/agent/{session_id}
+      │                  Auth: Google Identity Token (gcloud ADC)
+      ▼
+Server: ADK loop starts
+  Orchestrator (gemini-2.5-pro) reasons about task + screenshot
+  Delegates to sub-agent (ScreenAgent / InputAgent / ...)
+  Sub-agent sends  action_request ──▶ CLI
+      │
+      ▼
+CLI executes action locally (PyAutoGUI / AppleScript / osascript)
+CLI sends  action_result ──▶ Server
+      │
+      ▼
+Agent verifies result via new screenshot ──▶ repeats if needed
+      │
+      ▼
+Server sends  done  ──▶ CLI prints result
+```
+
+---
+
+## Cloud Deployment
+
+### Live Backend
+
+```
+Service : zener-server
+Region  : us-central1
+URL     : https://zener-server-902816427420.us-central1.run.app
+Image   : gcr.io/zener-ai-hackathon/zener-server:latest
+Memory  : 2Gi  |  CPU: 2  |  Max instances: 10
+Auth    : Google Identity Token (Cloud Run IAM)
+```
+
+### Automated Deployment (Infrastructure as Code)
+
+The entire backend is deployed with a single script — no manual Cloud Console steps.
+
+**`zener-server/deploy.sh`** provisions everything from scratch, idempotently:
+
+| Step | What it does |
+|------|-------------|
+| 1 | Enables Cloud Build, Cloud Run, Container Registry, Vertex AI APIs |
+| 2 | Creates `zener-server-sa` service account (if not exists) |
+| 3 | Grants IAM roles: `aiplatform.user`, `logging.logWriter`, `monitoring.metricWriter`, `storage.objectViewer` |
+| 4 | Builds Docker image via Cloud Build and pushes to GCR |
+| 5 | Deploys to Cloud Run with all runtime flags |
+| 6 | Prints the live service URL |
+
+```bash
+# Deploy from scratch (or update) with one command:
+cd zener-server
+./deploy.sh
+
+# Override project or region:
+PROJECT_ID=my-project REGION=us-east1 ./deploy.sh
+```
+
+**`zener-server/cloudbuild.yaml`** is used by Cloud Build for CI/CD — build, push, and deploy on every `gcloud builds submit`:
+
+```yaml
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["build", "-t", "gcr.io/$PROJECT_ID/zener-server:latest", ...]
+  - name: "gcr.io/cloud-builders/docker"
+    args: ["push", "--all-tags", "gcr.io/$PROJECT_ID/zener-server"]
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args: ["run", "deploy", "zener-server", "--image=...", "--region=us-central1", ...]
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.11+ |
+| CLI | Click + prompt_toolkit |
+| AI Framework | Google ADK (Agent Development Kit) |
+| Vision | Gemini 2.5 Flash (Vertex AI) |
+| Orchestrator | Gemini 2.5 Pro (Vertex AI) |
+| Auth | Google ADC — Identity Tokens (no API keys) |
+| Cloud | Google Cloud Run, Vertex AI |
+| macOS Input | PyAutoGUI + AppleScript |
+| IaC | `deploy.sh` + `cloudbuild.yaml` |
+| Container | Docker + Cloud Build |
+
+---
+
+## Architecture Details
+
+### Sub-Agents
+
+**ScreenAgent** (gemini-2.5-flash)
+- `take_screenshot` — Requests CLI to capture the screen and return base64 PNG
+- `describe_screenshot` — Gemini Vision analysis of what's visible
+
+**InputAgent** (gemini-2.5-flash)
 - `mouse_click`, `mouse_double_click`, `mouse_right_click`
 - `mouse_scroll`, `mouse_drag`
 - `keyboard_type`, `keyboard_press_key`
 - `open_application`, `open_url`
 
-**WindowAgent** (yabai optional)
-- `get_desktop_context` — Query windows/spaces/displays
-- `yabai_focus_window`, `yabai_move_to_space`, etc.
+**WindowAgent** (gemini-2.5-flash)
+- Window and space management via yabai (optional — graceful fallback if not installed)
 
-**ShellAgent**
-- `shell_run` — Execute commands in the cloud container
+**ShellAgent** (gemini-2.5-flash)
+- `shell_run` — Execute zsh commands in the cloud container
 - `file_read`, `file_write`, `file_list_dir`
 
-### Model Configuration
+### Model Config
 
-Override via environment variables:
+Override via environment variables before running `zener shell`:
 
 ```bash
+export ZENER_SERVER_URL=https://zener-server-902816427420.us-central1.run.app
 export ZENER_ORCHESTRATOR_MODEL=gemini-2.5-pro
 export ZENER_SCREEN_MODEL=gemini-2.5-flash
-export ZENER_SERVER_URL=https://zener-server-902816427420.us-central1.run.app
 ```
 
 ---
 
-## 🔒 Safety
+## Safety
 
-- Dangerous shell commands (`rm -rf`, `dd`, `shutdown`, etc.) are blocked
-- Shell commands require terminal confirmation when crossing safety thresholds
-- All actions execute locally on your Mac—you control what Zener can do
+- Dangerous shell commands (`rm -rf`, `dd`, `shutdown`, etc.) are blocked at the executor level
+- Risky operations prompt for terminal confirmation before executing
+- All mouse/keyboard actions execute locally on your Mac — the cloud never touches your files directly
 
 ---
 
-## 📄 License
+## Project Structure
 
-MIT License - See LICENSE file for details.
+```
+zener-web/
+├── zener-cli/              # macOS CLI client (install this)
+│   ├── pyproject.toml
+│   └── src/zener/
+│       ├── cli.py          # Click commands, REPL, Spinner UX
+│       ├── loop.py         # WebSocket client, streaming event loop
+│       ├── config.py       # Config dataclasses, server URL
+│       ├── macos.py        # screencapture, AppleScript, PyAutoGUI
+│       └── _vision.py      # Local Gemini Vision describe call
+│
+└── zener-server/           # Cloud Run backend (deploy this)
+    ├── deploy.sh           # One-command IaC deploy script
+    ├── cloudbuild.yaml     # Cloud Build CI/CD pipeline
+    ├── Dockerfile          # Container definition
+    ├── main.py             # FastAPI app entry point
+    └── server/
+        ├── adk_agent.py    # ADK multi-agent definitions (Vertex AI)
+        ├── adk_loop.py     # WebSocket event streamer + action round-trips
+        └── session.py      # /ws/agent/{session_id} WebSocket endpoint
+```
+
+---
+
+## Key Findings
+
+1. **Thin client pattern** — Moving all AI reasoning to Cloud Run eliminates local API key management and enables higher Vertex AI quotas
+2. **WebSocket action round-trips** — `action_request` / `action_result` protocol lets the cloud agent control the local Mac without any VNC or remote desktop
+3. **Spinner UX** — The CLI uses a live-updating spinner during the silent phases (auth, screenshot, connect) so the user always sees progress
+4. **Model stability** — gemini-2.0-flash was deprecated mid-development; pinning to gemini-2.5-pro/flash via env vars makes future migrations easy
+
+---
+
+## License
+
+MIT License
 
 ---
 

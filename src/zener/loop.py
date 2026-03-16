@@ -30,10 +30,11 @@ from . import config, macos
 logger = logging.getLogger(__name__)
 
 
-# ── Callbacks interface (same shape as before — cli.py unchanged) ─────────────
+# ── Callbacks interface ───────────────────────────────────────────────────────
 
 class LoopCallbacks:
     """Hooks the CLI attaches to observe loop progress in real-time."""
+    def on_status(self, text: str) -> None: ...          # transient status line
     def on_thought(self, author: str, text: str) -> None: ...
     def on_tool_call(self, step: int, tool_name: str, tool_input: Dict[str, Any]) -> None: ...
     def on_tool_result(self, step: int, tool_name: str, ok: bool, summary: str) -> None: ...
@@ -188,11 +189,14 @@ class AgentLoop:
     async def run_async(self, task: str) -> bool:
         cfg        = config.get_config()
         server_url = cfg.server_url
+        loop       = asyncio.get_event_loop()
 
         # ── Get auth token ───────────────────────────────────────────────────
+        self.callbacks.on_status("Authenticating...")
         try:
-            token = _get_identity_token(server_url)
+            token = await loop.run_in_executor(None, _get_identity_token, server_url)
         except RuntimeError as e:
+            self.callbacks.on_status("")
             self.callbacks.on_final(str(e))
             self.callbacks.on_done(False)
             return False
@@ -200,13 +204,17 @@ class AgentLoop:
         # ── Take initial screenshot ──────────────────────────────────────────
         screenshot_b64 = ""
         try:
-            ss_path = macos.take_screenshot()
+            self.callbacks.on_status("Capturing screen...")
+            ss_path = await loop.run_in_executor(None, macos.take_screenshot)
             screenshot_b64 = base64.b64encode(ss_path.read_bytes()).decode()
-            # Describe it locally so the user sees "Screen: ..." immediately
+            # Describe locally so the user sees "Screen: ..." immediately
+            self.callbacks.on_status("Analyzing screen...")
             from . import _vision
-            desc = _vision.describe_image(ss_path)
+            desc = await loop.run_in_executor(None, _vision.describe_image, ss_path)
+            self.callbacks.on_status("")
             self.callbacks.on_screenshot(desc)
         except Exception as e:
+            self.callbacks.on_status("")
             logger.warning("Initial screenshot failed: %s", e)
 
         # ── Build WebSocket URL (https → wss) ────────────────────────────────
@@ -215,6 +223,7 @@ class AgentLoop:
         ws_url = f"{ws_url}/ws/agent/{session_id}"
 
         # ── Connect and run ──────────────────────────────────────────────────
+        self.callbacks.on_status("Connecting to agent...")
         try:
             import websockets
             async with websockets.connect(
@@ -224,16 +233,19 @@ class AgentLoop:
                 ping_timeout=60,
                 open_timeout=30,
             ) as ws:
+                self.callbacks.on_status("Sending task...")
                 # Send task
                 await ws.send(json.dumps({
                     "type":           "task",
                     "task":           task,
                     "screenshot_b64": screenshot_b64,
                 }))
+                self.callbacks.on_status("Agent thinking...")
 
                 success = await self._event_loop(ws)
 
         except Exception as e:
+            self.callbacks.on_status("")
             logger.exception("WebSocket connection failed")
             self.callbacks.on_final(f"Connection error: {e}")
             self.callbacks.on_done(False)
