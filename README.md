@@ -11,7 +11,6 @@ Zener is an AI desktop automation agent that acts as **your hands on the screen*
 
 ---
 
-## 🏆 Hackathon Submission
 
 ### 📃 Text Description
 
@@ -63,7 +62,6 @@ Zener is an AI desktop automation agent for macOS that combines cloud-powered AI
 
 ### 👨‍💻 URL to Public Code Repository
 
-**GitHub**: https://github.com/etharo/zener-web
 
 **Repository Structure:**
 - `zener-cli/` — macOS CLI client (what users install)
@@ -73,22 +71,27 @@ Zener is an AI desktop automation agent for macOS that combines cloud-powered AI
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/etharo/zener-web.git
-cd zener-web/zener-cli
+git clone https://github.com/etharo/zener-cli.git
+cd zener-cli
 
-# 2. Create virtual environment
+# 2. Create a Python virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
-# 3. Install dependencies
+# 3. Install Python dependencies
 pip install -e .
 
-# 4. Set up Google authentication (no API key needed!)
-gcloud auth login
+# 4. Set up API keys/configuration
+# Copy .env.example to .env, then fill in your keys (see .env.example for details)
+cp ../.env.example .env
+# Edit .env and fill in your Firebase, Google Cloud, and Gemini API credentials
 
-# 5. Run!
-zener setup    # authenticates with Google
-zener shell   # interactive REPL
+# 5. (Optional, for GCP usage) Authenticate with Google Cloud if deploying server/code:
+#gcloud auth login
+
+# 6. Run Zener CLI
+zener setup    # enter API keys, perform initial config
+zener shell    # interactive CLI session
 ```
 
 ---
@@ -217,7 +220,7 @@ pip install -e .
 
 ```bash
 zener setup
-# Follow prompts to authenticate with Google
+# Follow prompts to authenticate with Google Firebase Auth
 ```
 
 ### Usage
