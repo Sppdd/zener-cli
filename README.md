@@ -169,7 +169,7 @@ Auth    : Google Identity Token (Cloud Run IAM)
 
 The entire backend is deployed with a single script — no manual Cloud Console steps.
 
-**`zener-server/deploy.sh`** provisions everything from scratch, idempotently:
+**`server/deploy.sh`** provisions everything from scratch, idempotently:
 
 | Step | What it does |
 |------|-------------|
@@ -182,14 +182,14 @@ The entire backend is deployed with a single script — no manual Cloud Console 
 
 ```bash
 # Deploy from scratch (or update) with one command:
-cd zener-server
+cd server
 ./deploy.sh
 
 # Override project or region:
 PROJECT_ID=my-project REGION=us-east1 ./deploy.sh
 ```
 
-**`zener-server/cloudbuild.yaml`** is used by Cloud Build for CI/CD — build, push, and deploy on every `gcloud builds submit`:
+**`server/cloudbuild.yaml`** is used by Cloud Build for CI/CD — build, push, and deploy on every `gcloud builds submit`:
 
 ```yaml
 steps:
@@ -265,17 +265,16 @@ export ZENER_SCREEN_MODEL=gemini-2.5-flash
 ## Project Structure
 
 ```
-zener-web/
-├── zener-cli/              # macOS CLI client (install this)
-│   ├── pyproject.toml
-│   └── src/zener/
-│       ├── cli.py          # Click commands, REPL, Spinner UX
-│       ├── loop.py         # WebSocket client, streaming event loop
-│       ├── config.py       # Config dataclasses, server URL
-│       ├── macos.py        # screencapture, AppleScript, PyAutoGUI
-│       └── _vision.py      # Local Gemini Vision describe call
+zener-cli/                  # Full project (CLI + Cloud backend)
+├── pyproject.toml          # CLI package config
+├── src/zener/             # CLI Python package
+│   ├── cli.py              # Click commands, REPL, Spinner UX
+│   ├── loop.py             # WebSocket client, streaming event loop
+│   ├── config.py           # Config dataclasses, server URL
+│   ├── macos.py            # screencapture, AppleScript, PyAutoGUI
+│   └── _vision.py          # Local Gemini Vision describe call
 │
-└── zener-server/           # Cloud Run backend (deploy this)
+└── server/                 # Cloud Run backend
     ├── deploy.sh           # One-command IaC deploy script
     ├── cloudbuild.yaml     # Cloud Build CI/CD pipeline
     ├── Dockerfile          # Container definition

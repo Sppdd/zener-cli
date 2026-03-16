@@ -1,0 +1,41 @@
+steps:
+  # Build container image using Cloud Build's docker builder
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/zener-server:latest"
+      - "-t"
+      - "gcr.io/$PROJECT_ID/zener-server:$BUILD_ID"
+      - "."
+
+  # Push image to Artifact Registry / GCR
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "--all-tags"
+      - "gcr.io/$PROJECT_ID/zener-server"
+
+  # Deploy to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "zener-server"
+      - "--image=gcr.io/$PROJECT_ID/zener-server:$BUILD_ID"
+      - "--region=us-central1"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--cpu=2"
+      - "--memory=2Gi"
+      - "--concurrency=1"
+      - "--max-instances=10"
+      - "--port=8080"
+      - "--timeout=300"
+      - "--set-env-vars=FIREBASE_PROJECT_ID=$PROJECT_ID,GOOGLE_CLOUD_PROJECT=$PROJECT_ID,GOOGLE_GENAI_USE_VERTEXAI=true"
+      - "--service-account=zener-server-sa@$PROJECT_ID.iam.gserviceaccount.com"
+
+images:
+  - "gcr.io/$PROJECT_ID/zener-server:latest"
+  - "gcr.io/$PROJECT_ID/zener-server:$BUILD_ID"
