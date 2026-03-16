@@ -27,6 +27,9 @@ class Config:
     window_model: str = "gemini-2.5-flash"
     shell_model: str = "gemini-2.5-flash"
 
+    # ── WebSocket client ────────────────────────────────────────────────────────
+    websocket_max_size: int = 100 * 1024 * 1024  # 100MB - for large screenshots/responses
+
     # ── Firebase (optional, unused by default) ────────────────────────────────
     firebase_api_key: str = ""
     firebase_project_id: str = "zener-ai-hackathon"
@@ -48,6 +51,7 @@ class Config:
             input_model=os.getenv("ZENER_INPUT_MODEL", "gemini-2.5-flash"),
             window_model=os.getenv("ZENER_WINDOW_MODEL", "gemini-2.5-flash"),
             shell_model=os.getenv("ZENER_SHELL_MODEL", "gemini-2.5-flash"),
+            websocket_max_size=int(os.getenv("WEBSOCKET_MAX_SIZE", 100 * 1024 * 1024)),
             firebase_api_key=os.getenv("FIREBASE_API_KEY", ""),
             firebase_project_id=firebase_project_id,
             firebase_auth_domain=os.getenv(

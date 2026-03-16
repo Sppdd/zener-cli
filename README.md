@@ -23,11 +23,9 @@ Zener is an AI desktop automation agent that acts as **your hands on the screen*
 
 ```bash
 git clone https://github.com/etharo/zener-web.git
-cd zener-web/zener-cli
+cd zener-cli
 
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .
+c
 ```
 
 ### 2. Authenticate

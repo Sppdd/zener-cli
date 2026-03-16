@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from . import config, macos
+from websockets.exceptions import ConnectionClosedError as WSConnectionClosedError
 
 logger = logging.getLogger(__name__)
 
@@ -222,34 +223,74 @@ class AgentLoop:
         ws_url = server_url.replace("https://", "wss://").replace("http://", "ws://")
         ws_url = f"{ws_url}/ws/agent/{session_id}"
 
-        # ── Connect and run ──────────────────────────────────────────────────
-        self.callbacks.on_status("Connecting to agent...")
-        try:
-            import websockets
-            async with websockets.connect(
-                ws_url,
-                additional_headers={"Authorization": f"Bearer {token}"},
-                ping_interval=20,
-                ping_timeout=60,
-                open_timeout=30,
-            ) as ws:
-                self.callbacks.on_status("Sending task...")
-                # Send task
-                await ws.send(json.dumps({
-                    "type":           "task",
-                    "task":           task,
-                    "screenshot_b64": screenshot_b64,
-                }))
-                self.callbacks.on_status("Agent thinking...")
+        # ── Connect and run with retry logic ────────────────────────────────────
+        import websockets
 
-                success = await self._event_loop(ws)
+        max_retries = 3
+        base_delay = 1.0
+        success = False
 
-        except Exception as e:
-            self.callbacks.on_status("")
-            logger.exception("WebSocket connection failed")
-            self.callbacks.on_final(f"Connection error: {e}")
-            self.callbacks.on_done(False)
-            return False
+        for attempt in range(max_retries):
+            try:
+                self.callbacks.on_status("Connecting to agent...")
+                async with websockets.connect(
+                    ws_url,
+                    additional_headers={"Authorization": f"Bearer {token}"},
+                    ping_interval=20,
+                    ping_timeout=60,
+                    open_timeout=30,
+                    max_size=cfg.websocket_max_size,
+                    max_queue=4,
+                ) as ws:
+                    self.callbacks.on_status("Sending task...")
+                    await ws.send(json.dumps({
+                        "type":           "task",
+                        "task":           task,
+                        "screenshot_b64": screenshot_b64,
+                    }))
+                    self.callbacks.on_status("Agent thinking...")
+
+                    success = await self._event_loop(ws)
+                    break
+
+            except WSConnectionClosedError as e:
+                if attempt < max_retries - 1 and e.code != 1009:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "Connection closed (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, max_retries, delay, e
+                    )
+                    self.callbacks.on_status(f"Connection lost, retrying ({attempt + 2}/{max_retries})...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    self.callbacks.on_status("")
+                    if e.code == 1009:
+                        self.callbacks.on_final(
+                            "Server sent data exceeding message size limit. "
+                            "Try a smaller task or increase WEBSOCKET_MAX_SIZE."
+                        )
+                    else:
+                        self.callbacks.on_final(f"Connection failed after {attempt + 1} attempt(s): {e}")
+                    self.callbacks.on_done(False)
+                    return False
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "Connection error (attempt %d/%d), retrying in %.1fs: %s",
+                        attempt + 1, max_retries, delay, e
+                    )
+                    self.callbacks.on_status(f"Connection error, retrying ({attempt + 2}/{max_retries})...")
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    self.callbacks.on_status("")
+                    logger.exception("WebSocket connection failed")
+                    self.callbacks.on_final(f"Connection error after {attempt + 1} attempt(s): {e}")
+                    self.callbacks.on_done(False)
+                    return False
 
         return success
 
@@ -318,6 +359,17 @@ class AgentLoop:
                     self.callbacks.on_final(f"Server error: {msg.get('message', '')}")
                     success = False
                     break
+
+        except WSConnectionClosedError as e:
+            logger.warning("WebSocket connection closed: %s", e)
+            if e.code == 1009:
+                self.callbacks.on_final(
+                    "Server sent data exceeding message size limit. "
+                    "Try a smaller task or increase WEBSOCKET_MAX_SIZE."
+                )
+            else:
+                self.callbacks.on_final(f"Connection closed: {e}")
+            success = False
 
         except Exception as e:
             logger.exception("Event loop error")
