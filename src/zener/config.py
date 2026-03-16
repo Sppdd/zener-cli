@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -5,25 +6,26 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+# Default Cloud Run server URL
+DEFAULT_SERVER_URL = "https://zener-server-902816427420.us-central1.run.app"
+
 
 @dataclass
 class Config:
-    # ── Gemini / GCP ──────────────────────────────────────────────────────────
-    gemini_api_key: str
-    gcp_project: str
-    gcp_location: str
+    # ── Cloud server ───────────────────────────────────────────────────────────
+    server_url: str = DEFAULT_SERVER_URL
 
-    # ── Per-agent model selection ──────────────────────────────────────────────
-    # Orchestrator: complex reasoning and delegation
-    orchestrator_model: str = "gemini-2.5-flash"
-    # Screen agent: fast multimodal screen description
-    screen_model: str = "gemini-2.5-flash-lite"
-    # Input agent: mouse/keyboard action planning
-    input_model: str = "gemini-2.5-flash-lite"
-    # Window/yabai agent: space and window management
-    window_model: str = "gemini-2.5-flash-lite"
-    # Shell agent: file system and shell commands
-    shell_model: str = "gemini-2.5-flash-lite"
+    # ── Gemini / GCP (only used when running locally without the server) ───────
+    gemini_api_key: str = ""
+    gcp_project: str = "zener-ai-hackathon"
+    gcp_location: str = "us-central1"
+
+    # ── Per-agent model selection (informational — server chooses its own) ─────
+    orchestrator_model: str = "gemini-2.5-pro"
+    screen_model: str = "gemini-2.5-flash"
+    input_model: str = "gemini-2.5-flash"
+    window_model: str = "gemini-2.5-flash"
+    shell_model: str = "gemini-2.5-flash"
 
     # ── Firebase (optional, unused by default) ────────────────────────────────
     firebase_api_key: str = ""
@@ -37,16 +39,15 @@ class Config:
         firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "zener-ai-hackathon")
 
         return cls(
+            server_url=os.getenv("ZENER_SERVER_URL", DEFAULT_SERVER_URL),
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             gcp_project=os.getenv("GOOGLE_CLOUD_PROJECT", "zener-ai-hackathon"),
             gcp_location=os.getenv("GCP_LOCATION", "us-central1"),
-            # Per-agent models (overridable via env)
-            orchestrator_model=os.getenv("ZENER_ORCHESTRATOR_MODEL", "gemini-2.5-flash"),
-            screen_model=os.getenv("ZENER_SCREEN_MODEL", "gemini-2.5-flash-lite"),
-            input_model=os.getenv("ZENER_INPUT_MODEL", "gemini-2.5-flash-lite"),
-            window_model=os.getenv("ZENER_WINDOW_MODEL", "gemini-2.5-flash-lite"),
-            shell_model=os.getenv("ZENER_SHELL_MODEL", "gemini-2.5-flash-lite"),
-            # Firebase (optional)
+            orchestrator_model=os.getenv("ZENER_ORCHESTRATOR_MODEL", "gemini-2.5-pro"),
+            screen_model=os.getenv("ZENER_SCREEN_MODEL", "gemini-2.5-flash"),
+            input_model=os.getenv("ZENER_INPUT_MODEL", "gemini-2.5-flash"),
+            window_model=os.getenv("ZENER_WINDOW_MODEL", "gemini-2.5-flash"),
+            shell_model=os.getenv("ZENER_SHELL_MODEL", "gemini-2.5-flash"),
             firebase_api_key=os.getenv("FIREBASE_API_KEY", ""),
             firebase_project_id=firebase_project_id,
             firebase_auth_domain=os.getenv(
@@ -95,3 +96,35 @@ def get_temp_dir() -> Path:
     temp_dir = get_cache_dir() / "temp"
     temp_dir.mkdir(exist_ok=True)
     return temp_dir
+
+
+def load_saved_config() -> None:
+    """Load config from ~/.zener/config.json into the environment."""
+    cfg_path = get_cache_dir() / "config.json"
+    if cfg_path.exists():
+        try:
+            data = json.loads(cfg_path.read_text())
+            for key, val in data.items():
+                if key not in os.environ:
+                    os.environ[key] = val
+            global _config
+            _config = None  # reset singleton so it re-reads env
+        except Exception:
+            pass
+
+
+def save_config_value(key: str, value: str) -> None:
+    """Persist a single key/value to ~/.zener/config.json."""
+    cfg_path = get_cache_dir() / "config.json"
+    existing: dict = {}
+    if cfg_path.exists():
+        try:
+            existing = json.loads(cfg_path.read_text())
+        except Exception:
+            pass
+    existing[key] = value
+    cfg_path.write_text(json.dumps(existing, indent=2))
+    cfg_path.chmod(0o600)
+    os.environ[key] = value
+    global _config
+    _config = None

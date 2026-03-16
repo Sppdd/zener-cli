@@ -1,258 +1,316 @@
 """
-loop.py — ADK Runner-based agent loop for Zener.
+loop.py — WebSocket client loop for Zener CLI.
 
-This replaces the old hand-rolled perception-action loop with Google ADK's
-Runner, which drives the orchestrator ↔ sub-agent conversation automatically.
+The CLI is now a thin client.  All AI reasoning runs on the Cloud Run server.
+This module:
+  1. Gets a Google identity token via ADC (gcloud auth application-default login)
+  2. Connects to wss://<server>/ws/agent/<session_id> with the token
+  3. Takes an initial screenshot and sends { type: "task", task, screenshot_b64 }
+  4. Streams events back and dispatches them to LoopCallbacks (terminal rendering)
+  5. When the server sends action_request, executes the action locally (macOS)
+     and sends back { type: "action_result", action, result }
+  6. Exits when { type: "done" } arrives
 
-Key design choices (OpenCode-inspired):
-  - Each task gets its own ADK Session (UUID)
-  - Completed sessions are committed to InMemoryMemoryService for cross-task recall
-  - LoopCallbacks interface preserved so cli.py doesn't need to change
-  - Desktop context (windows/spaces/frontmost app) is prepended to every task
-    so the orchestrator always knows what's on screen when planning
-  - Spinner + live event streaming mirrors OpenCode's step-by-step UX
-
-Event types surfaced to callbacks:
-  - on_thought: orchestrator text reasoning blocks
-  - on_tool_call: any tool or sub-agent call starting
-  - on_tool_result: tool result received
-  - on_done: final response text
-
-ADK event model:
-  event.author          → which agent or tool produced this event
-  event.content         → Content with parts (text, function_call, function_response)
-  event.is_final_response() → True for the last turn
+Auth: Google identity token sent as WebSocket subprotocol "bearer.<token>".
+This works with gcloud auth application-default login — no Firebase needed.
 """
+from __future__ import annotations
+
 import asyncio
+import base64
 import json
 import logging
+import os
+import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from google.adk.runners import Runner
-from google.genai import types as genai_types
-
-from . import agent, config, macos, memory, yabai
+from . import config, macos
 
 logger = logging.getLogger(__name__)
 
 
-# ── Callbacks interface (unchanged API — CLI wires in here) ───────────────────
+# ── Callbacks interface (same shape as before — cli.py unchanged) ─────────────
 
 class LoopCallbacks:
-    """Hooks the CLI can attach to observe loop progress in real-time."""
+    """Hooks the CLI attaches to observe loop progress in real-time."""
+    def on_thought(self, author: str, text: str) -> None: ...
+    def on_tool_call(self, step: int, tool_name: str, tool_input: Dict[str, Any]) -> None: ...
+    def on_tool_result(self, step: int, tool_name: str, ok: bool, summary: str) -> None: ...
+    def on_screenshot(self, description: str) -> None: ...
+    def on_final(self, text: str) -> None: ...
+    def on_done(self, success: bool) -> None: ...
+    def confirm_dangerous(self, message: str) -> bool: return False
 
-    def on_thought(self, author: str, text: str) -> None:
-        """Called when an agent emits reasoning text."""
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+def _get_identity_token(server_url: str) -> str:
+    """
+    Get a Google identity token for the Cloud Run audience.
+
+    Strategy (in order):
+    1. google.oauth2.id_token.fetch_id_token  — works on GCP or with a SA key
+    2. gcloud auth print-identity-token       — works for any logged-in user
+
+    Requires: gcloud auth login  (one-time)
+    """
+    # Strategy 1: google-auth library (works with service account / GCE metadata)
+    try:
+        import google.auth.transport.requests
+        import google.oauth2.id_token
+
+        request = google.auth.transport.requests.Request()
+        token = google.oauth2.id_token.fetch_id_token(request, server_url)
+        if token:
+            return str(token)
+    except Exception:
         pass
 
-    def on_tool_call(self, step: int, tool_name: str, tool_input: Dict[str, Any]) -> None:
-        """Called just before a tool or sub-agent is invoked."""
+    # Strategy 2: gcloud CLI fallback — works for any `gcloud auth login` user
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["gcloud", "auth", "print-identity-token",
+             f"--audiences={server_url}", "--quiet"],
+            capture_output=True, text=True, timeout=15,
+        )
+        token = result.stdout.strip()
+        if token and result.returncode == 0:
+            return token
+
+        # Some gcloud versions don't support --audiences; try without it
+        result2 = subprocess.run(
+            ["gcloud", "auth", "print-identity-token", "--quiet"],
+            capture_output=True, text=True, timeout=15,
+        )
+        token2 = result2.stdout.strip()
+        if token2 and result2.returncode == 0:
+            return token2
+    except Exception:
         pass
 
-    def on_tool_result(self, step: int, tool_name: str, ok: bool, summary: str) -> None:
-        """Called after a tool or sub-agent returns."""
-        pass
-
-    def on_screenshot(self, description: str) -> None:
-        """Called when a screenshot description is available."""
-        pass
-
-    def on_final(self, text: str) -> None:
-        """Called with the orchestrator's final response text."""
-        pass
-
-    def on_done(self, success: bool) -> None:
-        """Called when the loop finishes."""
-        pass
-
-    def confirm_dangerous(self, message: str) -> bool:
-        """Ask the user to confirm a dangerous command. Default: block."""
-        return False
+    raise RuntimeError(
+        "Could not obtain a Google identity token.\n"
+        "Run: gcloud auth login\n"
+        "Then retry."
+    )
 
 
-# ── AgentLoop ────────────────────────────────────────────────────────────────
+# ── Local action executor ─────────────────────────────────────────────────────
+
+def _execute_local_action(action: str, params: dict) -> dict:
+    """
+    Execute an action on the local Mac and return the result dict.
+    Called when the server sends an action_request event.
+    """
+    try:
+        if action == "take_screenshot":
+            path = macos.take_screenshot()
+            data = path.read_bytes()
+            b64  = base64.b64encode(data).decode()
+            return {"ok": True, "screenshot_b64": b64, "path": str(path)}
+
+        elif action == "describe_screenshot":
+            # Optionally use a provided screenshot, or take a fresh one
+            b64 = params.get("screenshot_b64", "")
+            if b64:
+                # Save to temp, describe
+                tmp = config.get_temp_dir() / f"desc_{uuid.uuid4().hex[:8]}.png"
+                tmp.write_bytes(base64.b64decode(b64))
+            else:
+                tmp = macos.take_screenshot()
+
+            from . import _vision
+            desc = _vision.describe_image(tmp)
+            return {"ok": True, "description": desc}
+
+        elif action == "mouse_click":
+            ok = macos.click_at(params["x"], params["y"])
+            return {"ok": ok}
+
+        elif action == "mouse_double_click":
+            ok = macos.double_click_at(params["x"], params["y"])
+            return {"ok": ok}
+
+        elif action == "mouse_right_click":
+            ok = macos.right_click_at(params["x"], params["y"])
+            return {"ok": ok}
+
+        elif action == "mouse_scroll":
+            ok = macos.scroll_at(
+                params["x"], params["y"],
+                params.get("direction", "down"),
+                params.get("amount", 3),
+            )
+            return {"ok": ok}
+
+        elif action == "mouse_drag":
+            ok = macos.drag_from_to(
+                params["x1"], params["y1"],
+                params["x2"], params["y2"],
+            )
+            return {"ok": ok}
+
+        elif action == "keyboard_type":
+            ok = macos.type_text(params["text"])
+            return {"ok": ok}
+
+        elif action == "keyboard_press_key":
+            ok = macos.press_key(params["key"])
+            return {"ok": ok}
+
+        elif action == "open_application":
+            ok = macos.open_application(params["name"])
+            return {"ok": ok}
+
+        elif action == "open_url":
+            ok = macos.open_url(params["url"])
+            return {"ok": ok}
+
+        else:
+            return {"ok": False, "error": f"Unknown action: {action}"}
+
+    except Exception as e:
+        logger.exception("Local action %s failed", action)
+        return {"ok": False, "error": str(e)}
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 class AgentLoop:
-    """Drives the ADK Runner for one `zener shell` session.
-
-    Maintains:
-      - The ADK Runner (wraps orchestrator + session + memory services)
-      - A step counter for the callbacks
-    """
-
     def __init__(self, callbacks: Optional[LoopCallbacks] = None):
         self.callbacks = callbacks or LoopCallbacks()
-        self._step = 0
-        self._runner: Optional[Runner] = None
-
-    def _get_runner(self) -> Runner:
-        """Lazily create the ADK Runner (builds agents on first call)."""
-        if self._runner is None:
-            self._runner = Runner(
-                agent=agent.get_orchestrator(),
-                app_name=memory.APP_NAME,
-                session_service=memory.session_service,
-                memory_service=memory.memory_service,
-            )
-        return self._runner
 
     def run(self, task: str) -> bool:
-        """Synchronous wrapper — runs the async loop in a new event loop.
-
-        Returns True if the agent completed successfully, False otherwise.
-        """
         return asyncio.run(self.run_async(task))
 
     async def run_async(self, task: str) -> bool:
-        """Run the agent loop for the given task, streaming events to callbacks.
+        cfg        = config.get_config()
+        server_url = cfg.server_url
 
-        Steps:
-          1. Gather desktop context (windows, spaces, frontmost app)
-          2. Take an initial screenshot and describe it
-          3. Build enriched task message
-          4. Create a new ADK session
-          5. Stream runner events → callbacks
-          6. Commit session to memory for future tasks
-        """
-        runner = self._get_runner()
-        session_id = memory.new_session_id()
+        # ── Get auth token ───────────────────────────────────────────────────
+        try:
+            token = _get_identity_token(server_url)
+        except RuntimeError as e:
+            self.callbacks.on_final(str(e))
+            self.callbacks.on_done(False)
+            return False
 
-        # Create ADK session
-        await memory.session_service.create_session(
-            app_name=memory.APP_NAME,
-            user_id=memory.USER_ID,
-            session_id=session_id,
-        )
-
-        # ── Step 1: gather desktop context ────────────────────────────────────
-        ctx = yabai.get_desktop_context()
-        ctx_lines = [f"Frontmost app: {ctx.get('frontmost_app', 'unknown')}"]
-        screen_w, screen_h = ctx.get("screen_size", [1920, 1080])
-        ctx_lines.append(f"Screen size: {screen_w}x{screen_h}")
-
-        spaces = ctx.get("spaces", [])
-        if spaces:
-            focused_space = next((s for s in spaces if s.get("has-focus")), None)
-            if focused_space:
-                ctx_lines.append(f"Current space: {focused_space.get('index')} ({focused_space.get('label') or 'unlabeled'})")
-
-        windows = ctx.get("windows", [])
-        if windows:
-            open_apps = sorted({w["app"] for w in windows if w.get("app")})
-            ctx_lines.append(f"Open apps: {', '.join(open_apps[:12])}")
-
-        # ── Step 2: initial screenshot ────────────────────────────────────────
+        # ── Take initial screenshot ──────────────────────────────────────────
+        screenshot_b64 = ""
         try:
             ss_path = macos.take_screenshot()
+            screenshot_b64 = base64.b64encode(ss_path.read_bytes()).decode()
+            # Describe it locally so the user sees "Screen: ..." immediately
             from . import _vision
-            screen_desc = _vision.describe_image(ss_path)
-            ctx_lines.append(f"Current screen: {screen_desc}")
-            self.callbacks.on_screenshot(screen_desc)
+            desc = _vision.describe_image(ss_path)
+            self.callbacks.on_screenshot(desc)
         except Exception as e:
-            logger.warning(f"Initial screenshot/description failed: {e}")
+            logger.warning("Initial screenshot failed: %s", e)
 
-        # ── Step 3: build enriched task message ───────────────────────────────
-        context_block = "\n".join(ctx_lines)
-        enriched_task = (
-            f"[Desktop context]\n{context_block}\n\n"
-            f"[Task]\n{task}"
-        )
+        # ── Build WebSocket URL (https → wss) ────────────────────────────────
+        session_id = uuid.uuid4().hex[:12]
+        ws_url = server_url.replace("https://", "wss://").replace("http://", "ws://")
+        ws_url = f"{ws_url}/ws/agent/{session_id}"
 
-        user_message = genai_types.Content(
-            role="user",
-            parts=[genai_types.Part(text=enriched_task)],
-        )
+        # ── Connect and run ──────────────────────────────────────────────────
+        try:
+            import websockets
+            async with websockets.connect(
+                ws_url,
+                additional_headers={"Authorization": f"Bearer {token}"},
+                ping_interval=20,
+                ping_timeout=60,
+                open_timeout=30,
+            ) as ws:
+                # Send task
+                await ws.send(json.dumps({
+                    "type":           "task",
+                    "task":           task,
+                    "screenshot_b64": screenshot_b64,
+                }))
 
-        # ── Step 4: stream runner events ──────────────────────────────────────
+                success = await self._event_loop(ws)
+
+        except Exception as e:
+            logger.exception("WebSocket connection failed")
+            self.callbacks.on_final(f"Connection error: {e}")
+            self.callbacks.on_done(False)
+            return False
+
+        return success
+
+    async def _event_loop(self, ws) -> bool:
+        """Process server events until done."""
+        step    = 0
         success = False
-        final_text = ""
 
         try:
-            async for event in runner.run_async(
-                user_id=memory.USER_ID,
-                session_id=session_id,
-                new_message=user_message,
-            ):
-                self._handle_event(event)
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    logger.warning("Non-JSON from server: %s", str(raw)[:100])
+                    continue
 
-                # Capture final response
-                if event.is_final_response():
-                    if event.content and event.content.parts:
-                        final_text = "".join(
-                            p.text for p in event.content.parts if hasattr(p, "text") and p.text
-                        ).strip()
-                    success = True
+                msg_type = msg.get("type", "")
 
-        except KeyboardInterrupt:
-            logger.info("Agent loop interrupted by user")
-            success = False
+                if msg_type == "thought":
+                    self.callbacks.on_thought(
+                        msg.get("author", "Zener"),
+                        msg.get("text", ""),
+                    )
+
+                elif msg_type == "tool_call":
+                    step = msg.get("step", step + 1)
+                    self.callbacks.on_tool_call(
+                        step,
+                        msg.get("tool", ""),
+                        msg.get("input", {}),
+                    )
+
+                elif msg_type == "tool_result":
+                    step = msg.get("step", step)
+                    self.callbacks.on_tool_result(
+                        step,
+                        msg.get("tool", ""),
+                        msg.get("ok", True),
+                        msg.get("summary", ""),
+                    )
+
+                elif msg_type == "screenshot":
+                    self.callbacks.on_screenshot(msg.get("description", ""))
+
+                elif msg_type == "action_request":
+                    # Execute locally and send result back
+                    action = msg.get("action", "")
+                    params = msg.get("params", {})
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None, _execute_local_action, action, params
+                    )
+                    await ws.send(json.dumps({
+                        "type":   "action_result",
+                        "action": action,
+                        "result": result,
+                    }))
+
+                elif msg_type == "final":
+                    self.callbacks.on_final(msg.get("text", ""))
+
+                elif msg_type == "done":
+                    success = msg.get("success", False)
+                    break
+
+                elif msg_type == "error":
+                    self.callbacks.on_final(f"Server error: {msg.get('message', '')}")
+                    success = False
+                    break
+
         except Exception as e:
-            logger.error(f"Runner error: {e}", exc_info=True)
+            logger.exception("Event loop error")
+            self.callbacks.on_final(f"Connection lost: {e}")
             success = False
-
-        if final_text:
-            self.callbacks.on_final(final_text)
-
-        # ── Step 5: commit session to memory ──────────────────────────────────
-        await memory.commit_session(session_id)
 
         self.callbacks.on_done(success)
         return success
-
-    def _handle_event(self, event: Any) -> None:
-        """Route an ADK event to the appropriate callback."""
-        author = getattr(event, "author", "Zener")
-        content = getattr(event, "content", None)
-
-        if not content:
-            return
-
-        for part in content.parts or []:
-            # ── Text / thought block ──────────────────────────────────────────
-            if hasattr(part, "text") and part.text:
-                text = part.text.strip()
-                if text and not event.is_final_response():
-                    self.callbacks.on_thought(author, text)
-
-            # ── Tool / sub-agent call ─────────────────────────────────────────
-            if hasattr(part, "function_call") and part.function_call:
-                fc = part.function_call
-                self._step += 1
-                tool_input: Dict[str, Any] = {}
-                if hasattr(fc, "args") and fc.args:
-                    try:
-                        tool_input = dict(fc.args)
-                    except Exception:
-                        tool_input = {}
-                self.callbacks.on_tool_call(self._step, fc.name, tool_input)
-
-            # ── Tool result ───────────────────────────────────────────────────
-            if hasattr(part, "function_response") and part.function_response:
-                fr = part.function_response
-                result_data: Any = {}
-                if hasattr(fr, "response") and fr.response:
-                    result_data = fr.response
-
-                ok = True
-                summary = ""
-                if isinstance(result_data, dict):
-                    ok = result_data.get("ok", True)
-                    # Build a short summary from common fields
-                    if "message" in result_data:
-                        summary = str(result_data["message"])
-                    elif "description" in result_data:
-                        summary = str(result_data["description"])[:120]
-                        self.callbacks.on_screenshot(summary)
-                    elif "error" in result_data:
-                        summary = str(result_data["error"])
-                        ok = False
-                    elif "stdout" in result_data:
-                        summary = str(result_data["stdout"])[:120].strip() or "(no output)"
-                    else:
-                        try:
-                            summary = json.dumps(result_data)[:120]
-                        except Exception:
-                            summary = str(result_data)[:120]
-
-                self.callbacks.on_tool_result(self._step, fr.name, ok, summary)

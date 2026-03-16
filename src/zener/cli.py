@@ -1,20 +1,23 @@
 """
 cli.py — Zener CLI entry point.
 
-User flow (unchanged from v1):
-  1. zener setup      — one-time: enter Gemini API key, saved to ~/.zener/config.json
-  2. zener shell      — interactive REPL (session memory persists across tasks)
+User flow (v3 — Cloud-powered):
+  1. zener setup      — one-time: authenticate with Google (gcloud ADC)
+  2. zener shell      — interactive REPL, tasks run on Cloud Run via Vertex AI
   3. zener run        — single task, exits 0/1
   4. zener screenshot — take a screenshot and describe it
 
-v2 changes (internal — UX is identical):
-  - Agent loop now uses Google ADK multi-agent Runner
-  - TerminalCallbacks wires ADK events (on_thought, on_tool_call, etc.) to terminal
-  - Spinner shown during initial context gathering
-  - Tool calls rendered with step number and tool name tag
+All AI reasoning runs on the Cloud Run server (Vertex AI, gemini-2.5-pro).
+The CLI is a thin terminal client: it takes screenshots, executes local
+macOS actions (click/type/scroll), and renders live streaming output.
+
+Auth: Google Application Default Credentials (ADC).
+  gcloud auth application-default login   ← run once
+No Gemini API key needed.
 """
 import sys
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -27,7 +30,8 @@ from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.styles import Style
 from prompt_toolkit.formatted_text import HTML
 
-from . import config, macos, loop as loop_module
+from . import config as config_module, macos
+from . import loop as loop_module
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -47,7 +51,6 @@ def print_thinking(text: str) -> None:
 
 
 def print_thought(author: str, text: str) -> None:
-    """Show an agent's reasoning block."""
     words = text.split()
     lines = []
     line: list = []
@@ -67,8 +70,6 @@ def print_thought(author: str, text: str) -> None:
 
 
 def print_tool_start(step: int, tool_name: str, tool_input: Dict[str, Any]) -> None:
-    """Render a tool call line — no newline, waiting for result."""
-    # Friendly label for known tools
     label_map = {
         "take_screenshot":           "screenshot",
         "describe_screenshot":       "describe",
@@ -79,23 +80,9 @@ def print_tool_start(step: int, tool_name: str, tool_input: Dict[str, Any]) -> N
         "mouse_drag":                "drag",
         "keyboard_type":             "type",
         "keyboard_press_key":        "key",
+        "open_application":          "open-app",
+        "open_url":                  "open-url",
         "wait":                      "wait",
-        "get_desktop_context":       "desktop-ctx",
-        "yabai_query_windows":       "windows",
-        "yabai_query_spaces":        "spaces",
-        "yabai_query_displays":      "displays",
-        "yabai_focus_window":        "focus-win",
-        "yabai_focus_window_by_app": "focus-app",
-        "yabai_move_to_space":       "move-space",
-        "yabai_focus_space":         "focus-space",
-        "yabai_move_and_follow":     "move+follow",
-        "yabai_toggle_fullscreen":   "fullscreen",
-        "yabai_toggle_float":        "float",
-        "yabai_balance_space":       "balance",
-        "yabai_rotate_space":        "rotate",
-        "yabai_resize_window":       "resize",
-        "yabai_warp_window":         "warp",
-        "yabai_swap_window":         "swap",
         "shell_run":                 "shell",
         "file_read":                 "read",
         "file_write":                "write",
@@ -109,7 +96,6 @@ def print_tool_start(step: int, tool_name: str, tool_input: Dict[str, Any]) -> N
     label = label_map.get(tool_name, tool_name)
     tag = click.style(f"[{label}]", fg="cyan")
 
-    # Build a one-line hint from input params
     hint = ""
     if tool_input:
         if "command" in tool_input:
@@ -122,8 +108,10 @@ def print_tool_start(step: int, tool_name: str, tool_input: Dict[str, Any]) -> N
             hint = str(tool_input["path"])[:50]
         elif "key" in tool_input:
             hint = str(tool_input["key"])
-        elif "app_name" in tool_input:
-            hint = str(tool_input["app_name"])
+        elif "name" in tool_input:
+            hint = str(tool_input["name"])
+        elif "url" in tool_input:
+            hint = str(tool_input["url"])[:60]
 
     click.echo(
         f"  {click.style(str(step), fg='bright_black', bold=True)}. {tag} {hint}",
@@ -146,9 +134,7 @@ def print_screenshot_desc(desc: str) -> None:
 
 
 def print_final(text: str) -> None:
-    """Show the orchestrator's final answer."""
     click.echo(f"\n  {click.style('─' * 48, fg='bright_black')}")
-    # Word-wrap at 76 chars
     words = text.split()
     lines = []
     line: list = []
@@ -184,6 +170,7 @@ def confirm_dangerous(message: str) -> bool:
 
 def print_header() -> None:
     width = 46
+    cfg = config_module.get_config()
     click.echo("")
     click.echo(click.style("  ╔" + "═" * width + "╗", fg="cyan"))
     click.echo(
@@ -194,21 +181,35 @@ def print_header() -> None:
     )
     click.echo(click.style("  ╚" + "═" * width + "╝", fg="cyan"))
 
-    api_ok = bool(config.get_config().gemini_api_key)
-    status = (
-        click.style("ready", fg="green")
-        if api_ok
-        else click.style("no API key — run: zener setup", fg="yellow")
-    )
+    auth_ok = _check_adc_fast()
+    if auth_ok:
+        status = click.style("ready  (Vertex AI / Cloud Run)", fg="green")
+    else:
+        status = click.style(
+            "not authenticated — run: gcloud auth application-default login",
+            fg="yellow",
+        )
+
     click.echo(f"  {click.style('status:', fg='bright_black')} {status}")
+    click.echo(f"  {click.style('server:', fg='bright_black')} {click.style(cfg.server_url, fg='bright_black')}")
     click.echo(f"  {click.style('type:', fg='bright_black')}   your task, or {click.style('help', fg='cyan')} / {click.style('exit', fg='cyan')}\n")
+
+
+def _check_adc_fast() -> bool:
+    """Quick check: does ADC exist on disk (no network call)?"""
+    import os
+    from pathlib import Path
+    # Standard ADC file locations
+    candidates = [
+        Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
+        Path(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent")),
+    ]
+    return any(p.exists() for p in candidates)
 
 
 # ── CLI callbacks ─────────────────────────────────────────────────────────────
 
 class TerminalCallbacks(loop_module.LoopCallbacks):
-    """Wires ADK Runner events to terminal output (OpenCode-style)."""
-
     def on_thought(self, author: str, text: str) -> None:
         if text:
             print_thought(author, text)
@@ -239,8 +240,6 @@ class TerminalCallbacks(loop_module.LoopCallbacks):
 # ── Spinner ───────────────────────────────────────────────────────────────────
 
 class Spinner:
-    """Braille-dot spinner shown while gathering desktop context."""
-
     FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def __init__(self, label: str = "Thinking"):
@@ -271,8 +270,6 @@ class Spinner:
 
 # ── Core task runner ──────────────────────────────────────────────────────────
 
-# Single AgentLoop instance per shell session — preserves the ADK Runner
-# (which holds the memory service) across tasks.
 _session_loop: Optional[loop_module.AgentLoop] = None
 
 
@@ -284,12 +281,6 @@ def _get_session_loop() -> loop_module.AgentLoop:
 
 
 def process_task(task: str) -> bool:
-    """Run the agent loop for a task, showing live progress."""
-    cfg = config.get_config()
-    if not cfg.gemini_api_key:
-        print_error("No Gemini API key. Run: zener setup")
-        return False
-
     click.echo(f"\n  {click.style('Task:', fg='cyan', bold=True)} {task}\n")
 
     agent_loop = _get_session_loop()
@@ -312,50 +303,74 @@ def process_task(task: str) -> bool:
 
 @click.group()
 def cli() -> None:
-    """Zener — AI agent that controls your Mac."""
+    """Zener — AI agent that controls your Mac via the cloud."""
     pass
 
 
 @cli.command()
 def setup() -> None:
-    """One-time setup: save your Gemini API key."""
-    import json
-    import os
+    """One-time setup: authenticate with Google for Vertex AI access."""
+    click.echo("\n  Zener Setup — Cloud Edition\n")
+    click.echo("  Zener uses your Google account to access Vertex AI on Cloud Run.")
+    click.echo("  No API key needed — just your Google login.\n")
 
-    click.echo("\n  Zener Setup\n")
-    click.echo("  Get a free API key at: https://aistudio.google.com/app/apikey\n")
-
-    key = click.prompt("  Gemini API key", hide_input=True, type=str).strip()
-    if not key:
-        print_error("API key cannot be empty")
+    # Step 1: Check gcloud is installed
+    result = subprocess.run(["which", "gcloud"], capture_output=True, text=True)
+    if result.returncode != 0:
+        print_error("gcloud CLI not found.")
+        click.echo("  Install it from: https://cloud.google.com/sdk/docs/install")
+        click.echo("  Then re-run: zener setup\n")
         sys.exit(1)
 
-    cache_dir = config.get_cache_dir()
-    cfg_path = cache_dir / "config.json"
+    click.echo("  " + click.style("Step 1:", fg="cyan", bold=True) + "  Checking gcloud login...")
+    login_result = subprocess.run(
+        ["gcloud", "auth", "print-identity-token", "--quiet"],
+        capture_output=True, text=True,
+    )
 
-    existing: dict = {}
-    if cfg_path.exists():
-        try:
-            existing = json.loads(cfg_path.read_text())
-        except Exception:
-            pass
+    if login_result.returncode != 0:
+        click.echo("  " + click.style("→", fg="yellow") + "  Not logged in. Opening browser for Google login...")
+        subprocess.run(["gcloud", "auth", "login", "--update-adc"])
+    else:
+        click.echo("  " + click.style("✓", fg="green") + "  Already logged in with gcloud.\n")
 
-    existing["GEMINI_API_KEY"] = key
-    cfg_path.write_text(json.dumps(existing, indent=2))
-    cfg_path.chmod(0o600)
+    # Step 2: Application Default Credentials
+    click.echo("  " + click.style("Step 2:", fg="cyan", bold=True) + "  Setting up Application Default Credentials...")
+    adc_ok = _check_adc_fast()
+    if not adc_ok:
+        click.echo("  " + click.style("→", fg="yellow") + "  Configuring ADC...")
+        subprocess.run(["gcloud", "auth", "application-default", "login"])
+    else:
+        click.echo("  " + click.style("✓", fg="green") + "  ADC already configured.\n")
 
-    os.environ["GEMINI_API_KEY"] = key
-    config._config = None  # reset singleton
+    # Step 3: Verify token works
+    click.echo("  " + click.style("Step 3:", fg="cyan", bold=True) + "  Verifying authentication...")
+    cfg = config_module.get_config()
+    try:
+        token = loop_module._get_identity_token(cfg.server_url)
+        if token:
+            click.echo("  " + click.style("✓", fg="green") + f"  Token obtained successfully.\n")
+        else:
+            raise ValueError("Empty token")
+    except Exception as e:
+        print_error(f"Could not get token: {e}")
+        click.echo("  Try running: gcloud auth application-default login\n")
+        sys.exit(1)
 
-    print_success("API key saved. You're ready — run: zener shell")
+    # Save server URL to config
+    config_module.save_config_value("ZENER_SERVER_URL", cfg.server_url)
+
+    print_success("Setup complete! Run: zener shell")
+    click.echo(f"  Server: {click.style(cfg.server_url, fg='bright_black')}")
+    click.echo(f"  Models: gemini-2.5-pro (orchestrator) + gemini-2.5-flash (agents)\n")
 
 
 @cli.command()
 def shell() -> None:
-    """Start the interactive Zener REPL (with session memory across tasks)."""
-    _load_saved_config()
+    """Start the interactive Zener REPL."""
+    config_module.load_saved_config()
 
-    history_path = config.get_cache_dir() / "history"
+    history_path = config_module.get_cache_dir() / "history"
     session = PromptSession(
         history=FileHistory(str(history_path)),
         auto_suggest=AutoSuggestFromHistory(),
@@ -390,11 +405,11 @@ def shell() -> None:
     exit / quit     Exit Zener
     help            Show this help
     screenshot      Describe current screen
-    models          Show configured models
-    setup           Update your API key
+    models          Show server model config
+    setup           Re-run authentication setup
 
-  Anything else is sent to the AI agent.
-  Memory of previous tasks persists for the session.
+  Anything else is sent to the AI agent running on Cloud Run.
+  The agent uses Vertex AI (gemini-2.5-pro) and controls your Mac remotely.
 """)
             continue
 
@@ -410,16 +425,17 @@ def shell() -> None:
             continue
 
         if cmd == "models":
-            cfg = config.get_config()
+            cfg = config_module.get_config()
             click.echo(f"""
-  {click.style('Models', fg='cyan', bold=True)}
+  {click.style('Models (Vertex AI on Cloud Run)', fg='cyan', bold=True)}
     orchestrator  {click.style(cfg.orchestrator_model, fg='bright_black')}
     screen        {click.style(cfg.screen_model, fg='bright_black')}
     input         {click.style(cfg.input_model, fg='bright_black')}
     window        {click.style(cfg.window_model, fg='bright_black')}
     shell         {click.style(cfg.shell_model, fg='bright_black')}
 
-  Override with env vars: ZENER_ORCHESTRATOR_MODEL, ZENER_SCREEN_MODEL, etc.
+  Server: {click.style(cfg.server_url, fg='bright_black')}
+  Override: ZENER_SERVER_URL, ZENER_ORCHESTRATOR_MODEL, etc.
 """)
             continue
 
@@ -432,10 +448,10 @@ def shell() -> None:
 
 @cli.command()
 @click.argument("task")
-@click.option("--max-steps", default=30, help="Maximum number of agent steps (unused in ADK mode, kept for compatibility)")
+@click.option("--max-steps", default=30, hidden=True)
 def run(task: str, max_steps: int) -> None:
     """Execute a single task and exit."""
-    _load_saved_config()
+    config_module.load_saved_config()
     success = process_task(task)
     sys.exit(0 if success else 1)
 
@@ -443,7 +459,7 @@ def run(task: str, max_steps: int) -> None:
 @cli.command()
 def screenshot() -> None:
     """Take a screenshot and describe what's on screen."""
-    _load_saved_config()
+    config_module.load_saved_config()
     try:
         print_thinking("Taking screenshot...")
         path = macos.take_screenshot()
@@ -454,28 +470,6 @@ def screenshot() -> None:
     except Exception as e:
         print_error(f"Failed: {e}")
         sys.exit(1)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _load_saved_config() -> None:
-    """Load API key (and other config) from ~/.zener/config.json into environment."""
-    import json
-    import os
-
-    if os.getenv("GEMINI_API_KEY"):
-        return
-
-    cfg_path = config.get_cache_dir() / "config.json"
-    if cfg_path.exists():
-        try:
-            data = json.loads(cfg_path.read_text())
-            for key, val in data.items():
-                if key not in os.environ:
-                    os.environ[key] = val
-            config._config = None  # reset singleton so it re-reads env
-        except Exception as e:
-            logger.warning(f"Could not load saved config: {e}")
 
 
 def main() -> None:
