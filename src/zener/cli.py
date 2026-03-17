@@ -71,22 +71,36 @@ def print_thought(author: str, text: str) -> None:
 
 def print_tool_start(step: int, tool_name: str, tool_input: Dict[str, Any]) -> None:
     label_map = {
+        # Screen
         "take_screenshot":           "screenshot",
         "describe_screenshot":       "describe",
+        # Mouse
         "mouse_click":               "click",
         "mouse_double_click":        "dbl-click",
         "mouse_right_click":         "r-click",
         "mouse_scroll":              "scroll",
         "mouse_drag":                "drag",
+        # Keyboard
         "keyboard_type":             "type",
         "keyboard_press_key":        "key",
+        # Apps
         "open_application":          "open-app",
         "open_url":                  "open-url",
         "wait":                      "wait",
+        # Shell (local Mac)
+        "shell_run_local":           "shell",
         "shell_run":                 "shell",
+        # Files (local Mac)
         "file_read":                 "read",
         "file_write":                "write",
+        "file_delete":               "delete",
         "file_list_dir":             "ls",
+        "file_mkdir":                "mkdir",
+        # Desktop
+        "get_desktop_context":       "desktop",
+        "switch_space":              "space",
+        "focus_window":              "focus",
+        # Legacy ADK agents
         "ScreenAgent":               "ScreenAgent",
         "InputAgent":                "InputAgent",
         "WindowAgent":               "WindowAgent",
@@ -94,24 +108,39 @@ def print_tool_start(step: int, tool_name: str, tool_input: Dict[str, Any]) -> N
         "load_memory":               "memory",
     }
     label = label_map.get(tool_name, tool_name)
-    tag = click.style(f"[{label}]", fg="cyan")
+
+    # Color-code by action category
+    danger_tools = {"file_delete", "shell_run_local", "shell_run"}
+    write_tools  = {"file_write", "file_mkdir", "keyboard_type"}
+    if tool_name in danger_tools:
+        tag = click.style(f"[{label}]", fg="red", bold=True)
+    elif tool_name in write_tools:
+        tag = click.style(f"[{label}]", fg="yellow")
+    else:
+        tag = click.style(f"[{label}]", fg="cyan")
 
     hint = ""
     if tool_input:
         if "command" in tool_input:
-            hint = str(tool_input["command"])[:60]
+            hint = click.style(str(tool_input["command"])[:60], fg="bright_black")
         elif "text" in tool_input:
-            hint = f'"{str(tool_input["text"])[:40]}"'
+            hint = click.style(f'"{str(tool_input["text"])[:40]}"', fg="bright_black")
         elif "x" in tool_input and "y" in tool_input:
-            hint = f"({tool_input['x']}, {tool_input['y']})"
+            hint = click.style(f"({tool_input['x']}, {tool_input['y']})", fg="bright_black")
         elif "path" in tool_input:
-            hint = str(tool_input["path"])[:50]
+            hint = click.style(str(tool_input["path"])[:60], fg="bright_black")
         elif "key" in tool_input:
-            hint = str(tool_input["key"])
+            hint = click.style(str(tool_input["key"]), fg="bright_black")
         elif "name" in tool_input:
-            hint = str(tool_input["name"])
+            hint = click.style(str(tool_input["name"]), fg="bright_black")
+        elif "app_name" in tool_input:
+            hint = click.style(str(tool_input["app_name"]), fg="bright_black")
         elif "url" in tool_input:
-            hint = str(tool_input["url"])[:60]
+            hint = click.style(str(tool_input["url"])[:60], fg="bright_black")
+        elif "index" in tool_input:
+            hint = click.style(f"space {tool_input['index']}", fg="bright_black")
+        elif "seconds" in tool_input:
+            hint = click.style(f"{tool_input['seconds']}s", fg="bright_black")
 
     click.echo(
         f"  {click.style(str(step), fg='bright_black', bold=True)}. {tag} {hint}",
@@ -310,6 +339,38 @@ class TerminalCallbacks(loop_module.LoopCallbacks):
     def confirm_dangerous(self, message: str) -> bool:
         self._clear_spinner()
         return confirm_dangerous(message)
+
+    # ── Permission gates ──────────────────────────────────────────────────────
+
+    def confirm_shell(self, command: str) -> bool:
+        """Prompt user before executing a potentially risky shell command."""
+        self._clear_spinner()
+        click.echo()
+        click.echo(f"  {click.style('SHELL', fg='yellow', bold=True)}: {click.style(command, fg='white')}")
+        return click.confirm("  Run this command on your Mac?", default=False)
+
+    def confirm_file_write(self, path: str, content_preview: str) -> bool:
+        """Prompt user before writing a file."""
+        self._clear_spinner()
+        click.echo()
+        click.echo(f"  {click.style('WRITE', fg='yellow', bold=True)}: {click.style(path, fg='white')}")
+        if content_preview:
+            preview_lines = content_preview.splitlines()[:5]
+            for ln in preview_lines:
+                click.echo(f"  {click.style('│', fg='bright_black')} {ln[:80]}")
+            if len(content_preview.splitlines()) > 5:
+                click.echo(f"  {click.style('│', fg='bright_black')} ...")
+        return click.confirm("  Write this file?", default=True)
+
+    def confirm_file_delete(self, path: str) -> bool:
+        """Prompt user before deleting a file or directory."""
+        self._clear_spinner()
+        click.echo()
+        click.echo(
+            f"  {click.style('DELETE', fg='red', bold=True)}: "
+            f"{click.style(path, fg='white')}"
+        )
+        return click.confirm("  Delete this?", default=False)
 
 
 # ── Core task runner ──────────────────────────────────────────────────────────

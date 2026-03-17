@@ -53,6 +53,10 @@ async def verify_task_complete(
     """
     try:
         from google.genai import types
+        from .image_utils import compress_screenshot
+
+        compressed_bytes, mime_type = compress_screenshot(screenshot_bytes)
+
         response = await gemini_client.aio.models.generate_content(
             model="gemini-2.0-flash-preview",
             contents=[
@@ -64,8 +68,8 @@ async def verify_task_complete(
                             "Reply ONLY 'YES' or 'NO: <reason>'."
                         ),
                         types.Part.from_bytes(
-                            data=screenshot_bytes,
-                            mime_type="image/png"
+                            data=compressed_bytes,
+                            mime_type=mime_type
                         ),
                     ]
                 )

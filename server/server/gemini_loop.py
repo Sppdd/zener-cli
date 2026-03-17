@@ -74,7 +74,11 @@ async def run_agent_turn(
     - Sends the current screenshot + task to Gemini
     - Returns parsed actions from the model response as JSON
     """
+    from .image_utils import compress_screenshot
+
     client = _get_client()
+
+    compressed_bytes, mime_type = compress_screenshot(screenshot_bytes)
 
     prompt = f"{SYSTEM_PROMPT}\n\nTask: {task}"
     if step > 1:
@@ -87,7 +91,7 @@ async def run_agent_turn(
                 role="user",
                 parts=[
                     types.Part(text=prompt),
-                    types.Part.from_bytes(data=screenshot_bytes, mime_type="image/png"),
+                    types.Part.from_bytes(data=compressed_bytes, mime_type=mime_type),
                 ]
             )
         ],

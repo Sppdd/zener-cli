@@ -20,7 +20,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from . import agent, auth, hive, adk_loop
+from . import agent, auth, hive, adk_loop, live_loop
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +58,12 @@ _session_events: dict[str, list[dict]] = {}
 @router.websocket("/ws/agent/{session_id}")
 async def ws_agent(websocket: WebSocket, session_id: str) -> None:
     """
-    Full-duplex WebSocket endpoint for the Zener ADK agent loop.
+    Full-duplex WebSocket endpoint — routes to Gemini Live API loop.
 
-    Auth: Bearer token in the Sec-WebSocket-Protocol header (gcloud ADC identity token).
-    The CLI sends the token as the WebSocket subprotocol:
-        websockets.connect(url, subprotocols=["bearer.<token>"])
+    Auth: Bearer token in the Authorization header (gcloud ADC identity token).
+    Message protocol: see live_loop.py docstring.
 
-    Message protocol: see adk_loop.py docstring.
+    Query param ?backend=adk to force the legacy ADK multi-agent loop.
     """
     # ── Auth: extract token from Authorization header or subprotocol ─────────
     token_str: str = ""
@@ -96,7 +95,9 @@ async def ws_agent(websocket: WebSocket, session_id: str) -> None:
     # Accept — no subprotocol needed (auth is via header)
     await websocket.accept()
 
-    logger.info("WS /ws/agent/%s connected (uid=%s)", session_id, uid)
+    # Select backend: default=live, ?backend=adk for legacy fallback
+    backend = websocket.query_params.get("backend", "live")
+    logger.info("WS /ws/agent/%s connected (uid=%s, backend=%s)", session_id, uid, backend)
 
     try:
         # Wait for the first message: { type: "task", task: str, screenshot_b64: str }
@@ -111,8 +112,13 @@ async def ws_agent(websocket: WebSocket, session_id: str) -> None:
             await websocket.close()
             return
 
-        # Hand off to the ADK loop (blocks until done)
-        await adk_loop.run_agent_loop(websocket, session_id, message)
+        # Route to the appropriate backend
+        if backend == "adk":
+            logger.info("Using legacy ADK backend for session %s", session_id)
+            await adk_loop.run_agent_loop(websocket, session_id, message)
+        else:
+            # Default: Gemini Live API — lower latency, stateful, single connection
+            await live_loop.run_agent_loop(websocket, session_id, message)
 
     except asyncio.TimeoutError:
         await websocket.send_text(json.dumps({

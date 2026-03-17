@@ -163,6 +163,10 @@ Memory  : 2Gi  |  CPU: 2  |  Max instances: 10
 Auth    : Google Identity Token (Cloud Run IAM)
 ```
 
+### Cloud Logs Proof (Console Screenshot)
+
+![Google Cloud Logs Explorer showing zener-server activity](assets/console%20preview.png)
+
 ### Automated Deployment (Infrastructure as Code)
 
 The entire backend is deployed with a single script — no manual Cloud Console steps.

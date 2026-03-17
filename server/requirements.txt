@@ -1,6 +1,7 @@
-# Google AI + ADK
-google-adk>=1.0.0
+# Google AI — Live API requires google-genai >= 0.8.0 (stable) or 1.x
 google-genai>=1.0.0
+# ADK is kept for the legacy fallback route (?backend=adk)
+google-adk>=1.0.0
 google-cloud-aiplatform>=1.60.0
 
 # Firebase / Firestore

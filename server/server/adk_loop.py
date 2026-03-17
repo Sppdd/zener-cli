@@ -97,6 +97,8 @@ async def run_agent_loop(websocket: WebSocket, session_id: str, message: dict) -
     )
 
     # ── Build enriched task message with initial screenshot context ──────────
+    from .image_utils import compress_screenshot
+
     context_parts = [f"Task: {task}"]
     if screenshot_b64:
         context_parts.insert(0, "[Initial screenshot attached as first message]")
@@ -107,11 +109,12 @@ async def run_agent_loop(websocket: WebSocket, session_id: str, message: dict) -
         try:
             import base64
             img_bytes = base64.b64decode(screenshot_b64)
+            compressed_bytes, mime_type = compress_screenshot(img_bytes)
             user_content_parts.append(
                 genai_types.Part(
                     inline_data=genai_types.Blob(
-                        data=img_bytes,
-                        mime_type="image/png",
+                        data=compressed_bytes,
+                        mime_type=mime_type,
                     )
                 )
             )
